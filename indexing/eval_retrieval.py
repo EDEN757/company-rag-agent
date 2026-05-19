@@ -1,0 +1,188 @@
+"""Evaluate the hybrid retriever against questions_test.parquet.
+
+Computes Recall@k, MRR@k, nDCG@k for k in {1, 3, 5, 10}.
+This is a Python re-implementation of the same fusion logic used by the
+TypeScript tool — keep them in lockstep when tuning weights.
+
+Usage:
+    python indexing/eval_retrieval.py \
+        --db        data/index/rag.db \
+        --questions data/raw/questions_test.parquet \
+        --top-k     10
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import re
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import pyarrow.parquet as pq
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+from embed import DIM, embed_one  # noqa: E402
+import httpx  # noqa: E402
+
+TOP_K_PER_BRANCH = 8
+KW_W = 0.3
+VEC_W = 0.7
+SCALE = 4
+THRESHOLD = 0.35
+
+
+def fts_query(q: str) -> str:
+    words = [w for w in re.split(r"\s+", q.lower()) if len(w) > 1]
+    words = [re.sub(r"[^\w]", "", w) for w in words]
+    words = [w for w in words if w]
+    if not words:
+        return '""'
+    return " OR ".join(f'"{w}"' for w in words)
+
+
+def load_matrix(con: sqlite3.Connection):
+    rows = con.execute(
+        "SELECT chunk_id, embedding FROM chunks WHERE embedding IS NOT NULL ORDER BY chunk_id"
+    ).fetchall()
+    ids = np.array([r[0] for r in rows], dtype=np.int64)
+    mat = np.zeros((len(rows), DIM), dtype=np.float32)
+    for i, (_, blob) in enumerate(rows):
+        mat[i] = np.frombuffer(blob, dtype=np.float32)
+    return mat, ids
+
+
+def chunk_to_doc(con: sqlite3.Connection):
+    return {r[0]: r[1] for r in con.execute("SELECT chunk_id, doc_id FROM chunks").fetchall()}
+
+
+def search(
+    con: sqlite3.Connection,
+    client: httpx.Client,
+    matrix: np.ndarray,
+    ids: np.ndarray,
+    c2d: dict,
+    query: str,
+    top_n: int = 10,
+):
+    qvec = embed_one(client, query)
+    sims = matrix @ qvec
+    order = np.argsort(-sims)[:TOP_K_PER_BRANCH]
+    vec_scores: dict[int, float] = {}
+    for idx in order:
+        cosine_dist = 1 - float(sims[idx])
+        vec_scores[int(ids[idx])] = (1 - cosine_dist) * SCALE
+
+    rows = con.execute(
+        "SELECT c.chunk_id FROM chunks_fts f JOIN chunks c ON c.chunk_id = f.rowid "
+        "WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts) LIMIT ?",
+        (fts_query(query), TOP_K_PER_BRANCH),
+    ).fetchall()
+    kw_scores: dict[int, float] = {}
+    for rank, (cid,) in enumerate(rows, start=1):
+        kw_scores[cid] = (1 / (1 + rank)) * SCALE
+
+    all_ids = set(vec_scores) | set(kw_scores)
+    fused = []
+    for cid in all_ids:
+        vec = vec_scores.get(cid, 0.0)
+        kw = kw_scores.get(cid, 0.0)
+        final = VEC_W * vec + KW_W * kw
+        if final >= THRESHOLD:
+            fused.append((cid, final))
+    fused.sort(key=lambda x: -x[1])
+    seen: list[str] = []
+    for cid, _ in fused[: top_n * 3]:
+        d = c2d.get(cid)
+        if d and d not in seen:
+            seen.append(d)
+        if len(seen) >= top_n:
+            break
+    return seen
+
+
+def parse_expected(s) -> list[str]:
+    if s is None:
+        return []
+    if isinstance(s, list):
+        return [str(x) for x in s]
+    text = str(s).strip()
+    # Convert Python-list-as-string to JSON.
+    text = text.replace("'", '"')
+    try:
+        v = json.loads(text)
+        if isinstance(v, list):
+            return [str(x) for x in v]
+    except Exception:
+        pass
+    return []
+
+
+def ndcg(predicted: list[str], expected: set[str], k: int) -> float:
+    dcg = 0.0
+    for i, d in enumerate(predicted[:k]):
+        if d in expected:
+            dcg += 1 / math.log2(i + 2)
+    ideal = sum(1 / math.log2(i + 2) for i in range(min(k, len(expected))))
+    return dcg / ideal if ideal > 0 else 0.0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--db", required=True)
+    ap.add_argument("--questions", required=True)
+    ap.add_argument("--top-k", type=int, default=10)
+    ap.add_argument("--limit", type=int, default=0)
+    args = ap.parse_args()
+
+    con = sqlite3.connect(args.db)
+    print("[load] embedding matrix")
+    matrix, ids = load_matrix(con)
+    c2d = chunk_to_doc(con)
+    print(f"[load] {len(ids)} chunks, dim={DIM}")
+
+    qt = pq.read_table(args.questions).to_pandas()
+    if args.limit:
+        qt = qt.head(args.limit)
+
+    ks = [1, 3, 5, args.top_k]
+    hits_at = {k: 0 for k in ks}
+    mrr_at = {k: 0.0 for k in ks}
+    ndcg_at = {k: 0.0 for k in ks}
+
+    t0 = time.time()
+    with httpx.Client(timeout=120) as client:
+        for i, row in enumerate(qt.itertuples(index=False)):
+            expected = set(parse_expected(row.expected_doc_ids))
+            if not expected:
+                continue
+            predicted = search(con, client, matrix, ids, c2d, row.question, top_n=args.top_k)
+            for k in ks:
+                top = predicted[:k]
+                if expected & set(top):
+                    hits_at[k] += 1
+                for idx, d in enumerate(top, start=1):
+                    if d in expected:
+                        mrr_at[k] += 1.0 / idx
+                        break
+                ndcg_at[k] += ndcg(top, expected, k)
+            if (i + 1) % 25 == 0:
+                dt = time.time() - t0
+                print(f"  {i+1}/{len(qt)}  ({(i+1)/dt:.1f} q/s)")
+
+    n = len(qt)
+    print()
+    print(f"{'k':>4} {'Recall':>8} {'MRR':>8} {'nDCG':>8}")
+    for k in ks:
+        print(f"{k:>4} {hits_at[k]/n:>8.3f} {mrr_at[k]/n:>8.3f} {ndcg_at[k]/n:>8.3f}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

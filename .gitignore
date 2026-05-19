@@ -1,0 +1,33 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+data/.venv/
+data/venv/
+.venv/
+venv/
+
+# Built / generated artifacts
+dist/
+build/
+*.tsbuildinfo
+
+# RAG index (rebuild from data/raw with `python indexing/build_index.py`)
+data/index/
+
+# Large source dump (1.4 GB) — only the 28 MB subset is committed
+data/raw/documents_test.parquet
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
