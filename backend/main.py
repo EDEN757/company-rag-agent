@@ -669,6 +669,14 @@ def run_agent(
 
         # Extract <think>…</think> blocks — present when Qwen3 reasoning is active
         think_text, visible_content = _extract_thinking(raw_content)
+        # Newer Ollama versions may return thinking in model_extra["thinking"] instead of
+        # inline <think> tags when using the OpenAI-compatible endpoint
+        if not think_text and thinking_mode:
+            model_extra = getattr(msg, 'model_extra', None) or {}
+            extra_think = model_extra.get('thinking') or model_extra.get('think_content')
+            if extra_think:
+                think_text = str(extra_think)
+                visible_content = raw_content  # content is already clean (no <think> tags)
         if think_text:
             thinking_steps.append(think_text)
 

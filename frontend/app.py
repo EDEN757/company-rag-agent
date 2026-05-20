@@ -19,6 +19,7 @@ Environment variables (set in ~/.bashrc on the Frontend app):
 import html
 import os
 import re
+import threading
 import urllib.parse
 
 import requests
@@ -30,7 +31,10 @@ import uvicorn
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://nv-service-e4bb2876d3e69f18fd98d56e852aa814:8500").rstrip("/")
 
 MAX_QUERY_HISTORY = 5
-DOC_ID_RE = re.compile(r'\b(dsid_[a-f0-9]+)\b')
+DOC_ID_RE    = re.compile(r'\b(dsid_[a-f0-9]+)\b')
+_HTML_TAG_RE = re.compile(r'<[^>]+>')
+
+_cancel_event = threading.Event()
 
 CSS = """
 .thinking-panel,
@@ -78,7 +82,18 @@ def _query_backend(
     enable_thinking: bool = False,
 ) -> tuple[str, str, str, str]:
     """Call /query and return (answer, thinking_md, traces_md, sources_md)."""
-    api_history = [{"role": m["role"], "content": m["content"]} for m in history]
+    # Build history defensively: handle Gradio 5 list-format content, strip HTML
+    api_history = []
+    for m in history:
+        if not isinstance(m, dict):
+            continue
+        content = m.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(c.get("text", "") if isinstance(c, dict) else str(c) for c in content)
+        content = _HTML_TAG_RE.sub("", str(content) if content is not None else "")
+        role = m.get("role", "")
+        if role in ("user", "assistant"):
+            api_history.append({"role": role, "content": content})
 
     try:
         resp = requests.post(
@@ -95,7 +110,12 @@ def _query_backend(
     except Exception as e:
         return f"Error: {e}", "", "", "*No sources retrieved for this query.*"
 
-    answer         = DOC_ID_RE.sub(lambda m: f'[{m.group(1)}](doc/{m.group(1)})', data.get("answer", ""))
+    # Make doc IDs in the answer clickable links opening in a new tab, with ?q= for highlighting
+    q_enc = urllib.parse.quote(question, safe="")
+    def _ans_link(m):
+        eid = html.escape(m.group(1))
+        return f'<a href="doc/{eid}?q={q_enc}" target="_blank" rel="noopener"><code>{eid}</code></a>'
+    answer         = DOC_ID_RE.sub(_ans_link, data.get("answer", ""))
     sources        = data.get("sources", [])
     latency        = data.get("latency_ms", 0)
     tool_traces    = data.get("tool_traces", [])
@@ -117,11 +137,9 @@ def _query_backend(
         traces_md = f"**Agent steps** &nbsp;*(completed in {latency:.0f} ms)*\n\n{items}"
 
     # ── Sources ────────────────────────────────────────────────────────────────
-    q_encoded = urllib.parse.quote(question, safe="")
-
     def _doc_link(doc_id: str) -> str:
         eid = html.escape(doc_id)
-        return f'<a href="doc/{eid}?q={q_encoded}" target="_blank" rel="noopener"><code>{eid}</code></a>'
+        return f'<a href="doc/{eid}?q={q_enc}" target="_blank" rel="noopener"><code>{eid}</code></a>'
 
     sources_md = "*No sources retrieved for this query.*"
     if sources:
@@ -173,29 +191,63 @@ def _render_history(entries: list[dict]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-# ── Chat handler ───────────────────────────────────────────────────────────────
+# ── Chat handler (generator — supports cancellation via stop button) ───────────
 def chat(
     question: str,
     history: list[dict],
     show_sources: bool,
     enable_thinking: bool,
     query_history: list[dict],
-) -> tuple[list[dict], str, str, list[dict], str]:
+):
     if not question.strip():
-        return history, "", "", query_history, _render_history(query_history)
-    answer, thinking_md, traces_md, sources_md = _query_backend(question, history, enable_thinking)
-    history = history + [
+        yield history, "", "", query_history, _render_history(query_history)
+        return
+
+    _cancel_event.clear()
+    result_holder: list = [None]
+
+    def _fetch():
+        result_holder[0] = _query_backend(question, history, enable_thinking)
+
+    t = threading.Thread(target=_fetch, daemon=True)
+    t.start()
+
+    loading = history + [
+        {"role": "user",      "content": question},
+        {"role": "assistant", "content": "⏳ Searching…"},
+    ]
+
+    while t.is_alive():
+        yield loading, "", "", query_history, _render_history(query_history)
+        t.join(timeout=0.5)
+        if _cancel_event.is_set():
+            interrupted = history + [
+                {"role": "user",      "content": question},
+                {"role": "assistant", "content": "⚠️ Search interrupted by user."},
+            ]
+            yield interrupted, "", "", query_history, _render_history(query_history)
+            return
+
+    if _cancel_event.is_set() or result_holder[0] is None:
+        interrupted = history + [
+            {"role": "user",      "content": question},
+            {"role": "assistant", "content": "⚠️ Search interrupted by user."},
+        ]
+        yield interrupted, "", "", query_history, _render_history(query_history)
+        return
+
+    answer, thinking_md, traces_md, sources_md = result_holder[0]
+
+    new_history = history + [
         {"role": "user",      "content": question},
         {"role": "assistant", "content": answer},
     ]
-
     new_qhist = ([{
         "question":   question,
         "traces_md":  traces_md,
         "sources_md": sources_md,
     }] + query_history)[:MAX_QUERY_HISTORY]
 
-    # Combine agent steps + sources into a single collapsible panel
     parts: list[str] = []
     if traces_md:
         parts.append(traces_md)
@@ -203,13 +255,11 @@ def chat(
         parts.append(sources_md)
     combined_md = "\n\n---\n\n".join(parts)
 
-    return (
-        history,
-        thinking_md,
-        combined_md,
-        new_qhist,
-        _render_history(new_qhist),
-    )
+    yield new_history, thinking_md, combined_md, new_qhist, _render_history(new_qhist)
+
+
+def _do_cancel():
+    _cancel_event.set()
 
 
 # ── Gradio UI ──────────────────────────────────────────────────────────────────
@@ -227,6 +277,7 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
             chatbot = gr.Chatbot(
                 label="Conversation",
                 height=380,
+                type="messages",
             )
             msg_box = gr.Textbox(
                 placeholder="Ask a question about company knowledge…",
@@ -236,6 +287,7 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
             )
             with gr.Row():
                 submit_btn  = gr.Button("Send", variant="primary")
+                stop_btn    = gr.Button("Stop")
                 clear_btn   = gr.Button("Clear conversation")
             show_sources    = gr.Checkbox(label="Show retrieved sources", value=True)
             enable_thinking = gr.Checkbox(label="Reasoning mode (slower — model thinks before answering)", value=False)
@@ -274,17 +326,22 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
     )
 
     # ── Event wiring ───────────────────────────────────────────────────────────
-    submit_btn.click(
+    # Keep references to the generator events so stop_btn can cancel them
+    _submit_event = submit_btn.click(
         fn=chat,
         inputs=[msg_box, chatbot, show_sources, enable_thinking, query_history_state],
         outputs=[chatbot, thinking_box, results_box, query_history_state, history_view],
-    ).then(fn=lambda: "", outputs=msg_box)
+    )
+    _submit_event.then(fn=lambda: "", outputs=msg_box)
 
-    msg_box.submit(
+    _msg_event = msg_box.submit(
         fn=chat,
         inputs=[msg_box, chatbot, show_sources, enable_thinking, query_history_state],
         outputs=[chatbot, thinking_box, results_box, query_history_state, history_view],
-    ).then(fn=lambda: "", outputs=msg_box)
+    )
+    _msg_event.then(fn=lambda: "", outputs=msg_box)
+
+    stop_btn.click(fn=_do_cancel, cancels=[_submit_event, _msg_event])
 
     clear_btn.click(
         fn=lambda: ([], "*Reasoning mode is off — enable the toggle to activate model thinking.*",
@@ -301,16 +358,39 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
 # ── Document viewer ────────────────────────────────────────────────────────────
 fastapi_app = FastAPI()
 
+# Highlight query terms that actually appear in the document, ranked by TF.
+# This shows WHICH words drove the BM25 score (terms the model actually matched),
+# not just all words from the query regardless of whether they appear.
 _HIGHLIGHT_JS = """
 <script>
 (function() {
   const q = new URLSearchParams(window.location.search).get('q') || '';
   if (!q) return;
-  const words = q.split(/\\s+/).filter(w => w.length > 3);
-  if (!words.length) return;
   const pre = document.querySelector('pre');
   if (!pre) return;
-  const escaped = words.map(w => w.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&'));
+
+  // Tokenize query into words > 3 chars
+  const queryTerms = (q.toLowerCase().match(/[a-zA-Z]\\w*/g) || []).filter(w => w.length > 3);
+  if (!queryTerms.length) return;
+
+  // Score each query term by term-frequency in the document (TF component of BM25).
+  // A term that appears often in this document contributed more to its retrieval score.
+  const docText  = pre.textContent.toLowerCase();
+  const docWords = (docText.match(/[a-zA-Z]\\w*/g) || []);
+  const docLen   = docWords.length || 1;
+  const tf = {};
+  for (const w of docWords) tf[w] = (tf[w] || 0) + 1;
+
+  const scored = queryTerms
+    .map(t => ({ t, s: (tf[t] || 0) / docLen }))
+    .filter(x => x.s > 0)
+    .sort((a, b) => b.s - a.s)
+    .slice(0, 12)
+    .map(x => x.t);
+
+  if (!scored.length) return;
+
+  const escaped = scored.map(w => w.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&'));
   const pat = new RegExp('(' + escaped.join('|') + ')', 'gi');
   pre.innerHTML = pre.innerHTML.replace(pat,
     '<mark style="background:#ff9800;color:#000;border-radius:2px">$1</mark>');
