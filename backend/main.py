@@ -72,7 +72,7 @@ KW_WEIGHT        = 0.3
 SCORE_THRESHOLD  = 0.35
 MAX_AGENT_TURNS  = 6
 MAX_HISTORY_TURNS = 10   # keep last N conversation turns; bounds context growth
-MAX_NEW_TOKENS   = 1024
+MAX_NEW_TOKENS   = 512
 TEMPERATURE      = 0.1
 MAX_EMBED_CHARS  = 6000   # mirrors embed.py — prevents Ollama 500s on long inputs
 TABLE_DOCS       = "rag_documents"
@@ -415,11 +415,15 @@ def rag_search(
 
 
 def fetch_document(doc_id: str) -> dict | None:
-    db_cur.execute(
-        f"SELECT doc_id, source_type, title, content FROM {TABLE_DOCS} WHERE doc_id = %s",
-        (doc_id,),
-    )
-    row = db_cur.fetchone()
+    cur = db_conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT doc_id, source_type, title, content FROM {TABLE_DOCS} WHERE doc_id = %s",
+            (doc_id,),
+        )
+        row = cur.fetchone()
+    finally:
+        cur.close()
     if not row:
         return None
     return {"doc_id": row[0], "source_type": row[1], "title": row[2], "content": row[3]}

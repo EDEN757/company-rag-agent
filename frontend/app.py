@@ -18,6 +18,7 @@ Environment variables (set in ~/.bashrc on the Frontend app):
 
 import html
 import os
+import re
 
 import requests
 import gradio as gr
@@ -28,9 +29,11 @@ import uvicorn
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://nv-service-e4bb2876d3e69f18fd98d56e852aa814:8500").rstrip("/")
 
 MAX_QUERY_HISTORY = 5   # how many past queries to keep in the history panel
+DOC_ID_RE = re.compile(r'\b(dsid_[a-f0-9]+)\b')
 
 CSS = """
 .thinking-panel { max-height: 300px; overflow-y: auto; padding-right: 4px; }
+.traces-panel   { max-height: 180px; overflow-y: auto; padding-right: 4px; }
 .history-panel  { max-height: 400px; overflow-y: auto; padding-right: 4px; }
 """
 
@@ -63,15 +66,17 @@ def _get_stats() -> str:
 def _query_backend(
     question: str,
     history: list[dict],
+    enable_thinking: bool = False,
 ) -> tuple[str, str, str, str]:
     """Call /query and return (answer, thinking_md, traces_md, sources_md)."""
     api_history = [{"role": m["role"], "content": m["content"]} for m in history]
+    question_to_send = question + " /think" if enable_thinking else question
 
     try:
         resp = requests.post(
             f"{BACKEND_URL}/query",
-            json={"question": question, "history": api_history},
-            timeout=180,
+            json={"question": question_to_send, "history": api_history},
+            timeout=300,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -82,7 +87,7 @@ def _query_backend(
     except Exception as e:
         return f"Error: {e}", "", "", "*No sources retrieved for this query.*"
 
-    answer         = data.get("answer", "")
+    answer         = DOC_ID_RE.sub(lambda m: f'[{m.group(1)}](doc/{m.group(1)})', data.get("answer", ""))
     sources        = data.get("sources", [])
     latency        = data.get("latency_ms", 0)
     tool_traces    = data.get("tool_traces", [])
@@ -92,8 +97,10 @@ def _query_backend(
     if thinking_steps:
         blocks = "\n\n---\n\n".join(thinking_steps)
         thinking_md = f"**Model reasoning:**\n\n{blocks}"
+    elif enable_thinking:
+        thinking_md = "*Reasoning mode is on but the model did not emit any reasoning for this query.*"
     else:
-        thinking_md = "*No model reasoning captured for this query.*"
+        thinking_md = "*Reasoning mode is off — enable the toggle to activate model thinking.*"
 
     # ── Agent step traces ──────────────────────────────────────────────────────
     traces_md = ""
@@ -108,15 +115,18 @@ def _query_backend(
         found   = [s for s in sources if not s.get("opened")]
         lines: list[str] = []
 
+        def _doc_link(doc_id: str) -> str:
+            eid = html.escape(doc_id)
+            return f'<a href="doc/{eid}" target="_blank" rel="noopener"><code>{eid}</code></a>'
+
         if opened:
             lines.append("**Read in full:**\n")
             for s in opened:
                 title    = s.get("title") or s["doc_id"]
                 preview  = s.get("preview", "")[:200]
-                doc_link = f"[`{s['doc_id']}`](doc/{s['doc_id']})"
                 lines.append(
                     f"**{title}**\n"
-                    f"`{s['source_type']}` &nbsp; {doc_link}\n"
+                    f"`{s['source_type']}` &nbsp; {_doc_link(s['doc_id'])}\n"
                     f"> {preview}…"
                 )
 
@@ -125,10 +135,9 @@ def _query_backend(
             for i, s in enumerate(found, 1):
                 title    = s.get("title") or s["doc_id"]
                 preview  = s.get("preview", "")[:200]
-                doc_link = f"[`{s['doc_id']}`](doc/{s['doc_id']})"
                 lines.append(
                     f"**{i}. {title}**\n"
-                    f"`{s['source_type']}` &nbsp; score: `{s['score']}` &nbsp; {doc_link}\n"
+                    f"`{s['source_type']}` &nbsp; score: `{s['score']}` &nbsp; {_doc_link(s['doc_id'])}\n"
                     f"> {preview}…"
                 )
 
@@ -160,11 +169,12 @@ def chat(
     question: str,
     history: list[dict],
     show_sources: bool,
+    enable_thinking: bool,
     query_history: list[dict],
 ) -> tuple[list[dict], str, str, str, list[dict], str]:
     if not question.strip():
         return history, "", "", "", query_history, _render_history(query_history)
-    answer, thinking_md, traces_md, sources_md = _query_backend(question, history)
+    answer, thinking_md, traces_md, sources_md = _query_backend(question, history, enable_thinking)
     history = history + [
         {"role": "user",      "content": question},
         {"role": "assistant", "content": answer},
@@ -212,19 +222,21 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
             with gr.Row():
                 submit_btn  = gr.Button("Send", variant="primary")
                 clear_btn   = gr.Button("Clear conversation")
-            show_sources = gr.Checkbox(label="Show retrieved sources", value=True)
+            show_sources    = gr.Checkbox(label="Show retrieved sources", value=True)
+            enable_thinking = gr.Checkbox(label="Reasoning mode (slower — model thinks before answering)", value=False)
 
         # ── Right column: reasoning + traces + sources + info ─────────────────
         with gr.Column(scale=1):
             with gr.Accordion("Model reasoning", open=False):
                 thinking_box = gr.Markdown(
-                    value="*Model reasoning will appear here after your first query.*",
+                    value="*Reasoning mode is off — enable the toggle to activate model thinking.*",
                     elem_classes=["thinking-panel"],
                 )
-            traces_box = gr.Markdown(
-                value="",
-                label="Agent steps",
-            )
+            with gr.Accordion("Agent steps", open=True):
+                traces_box = gr.Markdown(
+                    value="",
+                    elem_classes=["traces-panel"],
+                )
             sources_box = gr.Markdown(
                 value="*Sources will appear here after each query.*",
                 label="Sources",
@@ -253,20 +265,20 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
     # ── Event wiring ───────────────────────────────────────────────────────────
     submit_btn.click(
         fn=chat,
-        inputs=[msg_box, chatbot, show_sources, query_history_state],
+        inputs=[msg_box, chatbot, show_sources, enable_thinking, query_history_state],
         outputs=[chatbot, thinking_box, traces_box, sources_box,
                  query_history_state, history_view],
     ).then(fn=lambda: "", outputs=msg_box)
 
     msg_box.submit(
         fn=chat,
-        inputs=[msg_box, chatbot, show_sources, query_history_state],
+        inputs=[msg_box, chatbot, show_sources, enable_thinking, query_history_state],
         outputs=[chatbot, thinking_box, traces_box, sources_box,
                  query_history_state, history_view],
     ).then(fn=lambda: "", outputs=msg_box)
 
     clear_btn.click(
-        fn=lambda: ([], "*Model reasoning will appear here after your first query.*", "",
+        fn=lambda: ([], "*Reasoning mode is off — enable the toggle to activate model thinking.*", "",
                     "*Sources will appear here after each query.*",
                     [], "*No previous queries in this session.*"),
         outputs=[chatbot, thinking_box, traces_box, sources_box,
