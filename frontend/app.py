@@ -33,9 +33,17 @@ MAX_QUERY_HISTORY = 5
 DOC_ID_RE = re.compile(r'\b(dsid_[a-f0-9]+)\b')
 
 CSS = """
-.thinking-panel { max-height: 300px; overflow-y: auto; padding-right: 4px; }
-.results-panel  { max-height: 400px; overflow-y: auto; padding-right: 4px; }
-.history-panel  { max-height: 400px; overflow-y: auto; padding-right: 4px; }
+.thinking-panel,
+.thinking-panel > div,
+.thinking-panel .prose { max-height: 300px !important; overflow-y: auto !important; }
+
+.results-panel,
+.results-panel > div,
+.results-panel .prose  { max-height: 380px !important; overflow-y: auto !important; }
+
+.history-panel,
+.history-panel > div,
+.history-panel .prose  { max-height: 380px !important; overflow-y: auto !important; }
 """
 
 

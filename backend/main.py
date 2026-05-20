@@ -34,6 +34,7 @@ Environment variables (set in Nuvolos Backend app CONFIGURE):
     PGDATABASE      nuvolos
 """
 
+import math
 import os
 import re
 import json
@@ -70,9 +71,12 @@ TOP_K_PER_BRANCH = 8
 VEC_WEIGHT       = 0.7
 KW_WEIGHT        = 0.3
 SCORE_THRESHOLD  = 0.35
+SCORE_SCALE      = 4.0
+BM25_K1          = 1.5
+BM25_B           = 0.75
 MAX_AGENT_TURNS  = 6
 MAX_HISTORY_TURNS = 10   # keep last N conversation turns; bounds context growth
-MAX_NEW_TOKENS   = 512
+MAX_NEW_TOKENS   = 2048
 TEMPERATURE      = 0.1
 MAX_EMBED_CHARS  = 6000   # mirrors embed.py — prevents Ollama 500s on long inputs
 TABLE_DOCS       = "rag_documents"
@@ -104,9 +108,15 @@ linear, hubspot, github, fireflies, gmail, slack).
 
 Primary workflow:
 1. Call `search` ONCE with a natural-language query. Each result includes doc_id,
-   source_type, a preview, and a fused score. Use optional filters (source_types,
-   date_from, date_to, participant) only when the user is explicit about who, when,
-   or where.
+   source_type, a preview, and a fused score. Use optional filters when relevant:
+   - source_types: when the user specifies a channel (email, slack, jira, etc.)
+   - date_from / date_to (YYYY-MM-DD): only when the user is asking about WHEN
+     something was communicated — e.g. "emails sent in November" or "last week's
+     meeting notes". Do NOT add date filters when a time word describes the topic
+     rather than the send date — e.g. "November invoice spike" means an event that
+     happened in November, but the document discussing it may have been sent at any
+     time (days, weeks, or months later). Let the search query keywords find it.
+   - participant: when the user mentions a specific person.
 2. Look at the top results. If the highest-scoring hit's preview clearly addresses
    the question, call `open_document` on its doc_id and answer from the full text.
    Score >= 2.0 is almost always a strong match — do not keep re-searching.
@@ -132,8 +142,10 @@ TOOLS = [
         "function": {
             "name": "search",
             "description": (
-                "Search the company knowledge base using hybrid keyword + vector retrieval. "
-                "Returns ranked chunks with a short preview and doc_id."
+                "Search the company knowledge base (documents, emails, chats) using hybrid "
+                "BM25 keyword + dense vector retrieval. Returns ranked chunks with a short "
+                "preview so you can decide which document to open in full. Use optional "
+                "filters to narrow by source, date range, or participant."
             ),
             "parameters": {
                 "type": "object",
@@ -141,12 +153,18 @@ TOOLS = [
                     "query": {"type": "string", "description": "Natural-language search query."},
                     "source_types": {
                         "type": "array", "items": {"type": "string"},
-                        "description": "Optional filter: slack, gmail, linear, jira, confluence, google_drive, hubspot, github, fireflies.",
+                        "description": "Optional list of source types to restrict the search to. One or more of: slack, gmail, linear, jira, confluence, google_drive, hubspot, github, fireflies.",
                     },
-                    "date_from": {"type": "string", "description": "Optional ISO-8601 date lower bound."},
-                    "date_to":   {"type": "string", "description": "Optional ISO-8601 date upper bound."},
-                    "participant": {"type": "string", "description": "Optional email or Slack handle to filter by."},
-                    "top_n": {"type": "integer", "description": "Number of results (default 6, max 20)."},
+                    "date_from": {
+                        "type": "string",
+                        "description": "Optional ISO-8601 date lower bound. Only chunks whose ts_to is null or >= date_from are considered (mostly meaningful for gmail — filters by when the message was sent, not by what it discusses).",
+                    },
+                    "date_to": {
+                        "type": "string",
+                        "description": "Optional ISO-8601 date upper bound (mostly meaningful for gmail — filters by when the message was sent, not by what it discusses).",
+                    },
+                    "participant": {"type": "string", "description": "Optional substring to match against participants (email or Slack handle). Use when the user asks who said or sent something."},
+                    "top_n": {"type": "integer", "description": "How many fused hits to return (default 6, max 20)."},
                 },
                 "required": ["query"],
             },
@@ -156,7 +174,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "open_document",
-            "description": "Fetch the full text of a document by its doc_id (as returned by `search`).",
+            "description": "Fetch the full text of a document by its doc_id (as returned by `search`). Use this after `search` when a preview looks relevant and you need the complete content to answer.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -241,6 +259,7 @@ async def lifespan(app: FastAPI):
     db_conn.autocommit = True
     register_vector(db_conn)
     db_cur = db_conn.cursor()
+    db_cur.execute("SET ivfflat.probes = 10;")  # improves ANN recall (default=1)
     db_cur.execute(f"SELECT COUNT(*) FROM {TABLE_CHUNKS};")
     n_chunks = db_cur.fetchone()[0]
     log.info(f"pgvector connected — {n_chunks} chunks indexed.")
@@ -311,6 +330,50 @@ def _embed(text: str) -> list[float]:
     return vec.tolist()
 
 
+# ── BM25 keyword scoring ───────────────────────────────────────────────────────
+def _fts_or_query(q: str) -> str | None:
+    """Strip non-alpha chars and OR-join words for a PostgreSQL tsquery.
+    Mirrors src/rag/fusion.ts ftsQuery: any-word matching for maximum recall."""
+    words = [w for w in re.findall(r'[a-zA-Z]\w*', q.lower()) if len(w) > 1]
+    return " | ".join(words) if words else None
+
+
+def _tokenize(text: str) -> list[str]:
+    return [w for w in re.findall(r'[a-zA-Z]\w*', text.lower()) if len(w) > 1]
+
+
+def _bm25_scores(query_terms: list[str], candidates: list[tuple[int, str]]) -> dict[int, float]:
+    """Compute BM25 scores for (chunk_id, text) pairs.
+    Mirrors the BM25 ranking used by SQLite FTS5 in the local TypeScript agent."""
+    if not candidates or not query_terms:
+        return {}
+    tokenized = [(cid, _tokenize(text)) for cid, text in candidates]
+    lengths   = [len(toks) for _, toks in tokenized]
+    avgdl     = sum(lengths) / len(lengths) if lengths else 1
+    N         = len(tokenized)
+
+    df: dict[str, int] = {}
+    for _, toks in tokenized:
+        for term in set(toks):
+            df[term] = df.get(term, 0) + 1
+
+    result: dict[int, float] = {}
+    for cid, toks in tokenized:
+        dl = len(toks)
+        tf: dict[str, int] = {}
+        for t in toks:
+            tf[t] = tf.get(t, 0) + 1
+        score = 0.0
+        for term in query_terms:
+            if term not in df:
+                continue
+            f   = tf.get(term, 0)
+            idf = math.log((N - df[term] + 0.5) / (df[term] + 0.5) + 1)
+            score += idf * (f * (BM25_K1 + 1)) / (f + BM25_K1 * (1 - BM25_B + BM25_B * dl / avgdl))
+        result[cid] = score
+    return result
+
+
 # ── Retrieval ──────────────────────────────────────────────────────────────────
 def _build_filters(
     source_types: list[str] | None,
@@ -359,25 +422,32 @@ def rag_search(
     )
     vec_scores: dict[int, tuple] = {}
     for chunk_id, doc_id, source_type, text, ts_from, ts_to, dist in db_cur.fetchall():
-        vec_scores[chunk_id] = (doc_id, source_type, text, ts_from, ts_to, (1.0 - float(dist)) * 4)
+        vec_scores[chunk_id] = (doc_id, source_type, text, ts_from, ts_to, (1.0 - float(dist)) * SCORE_SCALE)
 
-    # Keyword branch (PostgreSQL FTS — ts_rank, not BM25, but best available on pgvector)
+    # Keyword branch — OR-joined FTS candidates, reranked by BM25 in Python.
+    # Mirrors src/rag/fusion.ts: ftsQuery OR-joins words for recall, BM25 for ranking.
     kw_scores: dict[int, tuple] = {}
-    try:
-        kw_conditions = filter_clauses + ["text_tsv @@ plainto_tsquery('english', %s)"]
-        kw_where = "WHERE " + " AND ".join(kw_conditions)
-        db_cur.execute(
-            f"""SELECT chunk_id, doc_id, source_type, text, ts_from, ts_to
-                FROM   {TABLE_CHUNKS} {kw_where}
-                ORDER  BY ts_rank(text_tsv, plainto_tsquery('english', %s)) DESC
-                LIMIT  %s""",
-            [query] + filter_params + [query, TOP_K_PER_BRANCH],
-        )
-        for i, (chunk_id, doc_id, source_type, text, ts_from, ts_to) in enumerate(db_cur.fetchall()):
-            kw_scores[chunk_id] = (doc_id, source_type, text, ts_from, ts_to, (1 / (i + 2)) * 4)
-    except Exception as e:
-        log.warning(f"Keyword branch failed (vector-only fallback): {e}")
-        db_conn.autocommit = True
+    fts_q = _fts_or_query(query)
+    if fts_q:
+        try:
+            kw_conditions = filter_clauses + ["text_tsv @@ to_tsquery('english', %s)"]
+            kw_where = "WHERE " + " AND ".join(kw_conditions)
+            db_cur.execute(
+                f"""SELECT chunk_id, doc_id, source_type, text, ts_from, ts_to
+                    FROM   {TABLE_CHUNKS} {kw_where}
+                    LIMIT  %s""",
+                filter_params + [fts_q, TOP_K_PER_BRANCH * 3],
+            )
+            rows = db_cur.fetchall()
+            query_terms = _tokenize(query)
+            bm25 = _bm25_scores(query_terms, [(r[0], r[3]) for r in rows])
+            ranked = sorted(rows, key=lambda r: bm25.get(r[0], 0.0), reverse=True)[:TOP_K_PER_BRANCH]
+            for rank, (chunk_id, doc_id, source_type, text, ts_from, ts_to) in enumerate(ranked, 1):
+                kw_scores[chunk_id] = (doc_id, source_type, text, ts_from, ts_to,
+                                       (1 / (1 + rank)) * SCORE_SCALE)
+        except Exception as e:
+            log.warning(f"Keyword branch failed (vector-only fallback): {e}")
+            db_conn.autocommit = True
 
     all_chunk_ids = set(vec_scores) | set(kw_scores)
     if not all_chunk_ids:
@@ -444,13 +514,20 @@ def execute_tool(name: str, args: dict) -> tuple[str, list[dict]]:
             top_n=args.get("top_n", 6),
         )
         if not hits:
-            return "No results above threshold. Try broadening the query or removing filters.", []
+            return "No results above the fusion threshold. Try broadening the query or removing filters.", []
         lines = []
         for h in hits:
-            ts = f" [{h['ts_from']}]" if h.get("ts_from") else ""
+            ts_from = h.get("ts_from") or ""
+            ts_to   = h.get("ts_to") or ""
+            if ts_from and ts_to and ts_to != ts_from:
+                time_str = f" [{ts_from} → {ts_to}]"
+            elif ts_from:
+                time_str = f" [{ts_from}]"
+            else:
+                time_str = ""
             lines.append(
-                f"chunk_id={h['chunk_id']}  doc_id={h['doc_id']}  "
-                f"source={h['source_type']}{ts}  score={h['score']}\n"
+                f"#{h['chunk_id']} (doc={h['doc_id']}, source={h['source_type']}{time_str}, "
+                f"score={h['score']} vec={h['vec_score']} kw={h['kw_score']})\n"
                 f"title: {h['title'] or ''}\npreview: {h['preview']}"
             )
         return "\n\n".join(lines), hits
@@ -478,19 +555,19 @@ def execute_tool(name: str, args: dict) -> tuple[str, list[dict]]:
         ), [source_hit]
 
     if name == "read":
-        path = args["path"]
+        path = os.path.expanduser(args["path"])
         with open(path, "r", encoding="utf-8") as f:
             return f.read(), []
 
     if name == "write":
-        path = args["path"]
+        path = os.path.expanduser(args["path"])
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(args["content"])
         return f"Wrote {len(args['content'])} bytes to {path}", []
 
     if name == "edit":
-        path = args["path"]
+        path = os.path.expanduser(args["path"])
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
         old_s, new_s = args["old_string"], args["new_string"]
@@ -567,7 +644,8 @@ def _trace_result(name: str, result_text: str, hits: list) -> str:
 def run_agent(
     question: str, history: list[HistoryMessage], thinking_mode: bool = False
 ) -> tuple[str, list[dict], list[str], list[str]]:
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    system_content = "/think\n\n" + SYSTEM_PROMPT if thinking_mode else SYSTEM_PROMPT
+    messages: list[dict] = [{"role": "system", "content": system_content}]
     for h in history[-MAX_HISTORY_TURNS * 2:]:   # each turn = 2 messages (user + assistant)
         messages.append({"role": h.role, "content": h.content})
     messages.append({"role": "user", "content": question})
@@ -584,7 +662,7 @@ def run_agent(
             tool_choice="auto",
             max_tokens=MAX_NEW_TOKENS,
             temperature=TEMPERATURE,
-            extra_body={"options": {"num_ctx": 32768, "think": thinking_mode}},
+            extra_body={"options": {"num_ctx": 32768, **({"think": True} if thinking_mode else {})}},
         )
         msg = resp.choices[0].message
         raw_content = msg.content or ""
