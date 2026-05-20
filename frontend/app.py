@@ -52,13 +52,10 @@ def _get_stats() -> str:
 
 def _query_backend(
     question: str,
-    history: list[tuple[str, str]],
+    history: list[dict],
 ) -> tuple[str, str, str, str]:
     """Call /query and return (answer, thinking_md, traces_md, sources_md)."""
-    api_history = []
-    for user_msg, assistant_msg in history:
-        api_history.append({"role": "user",      "content": user_msg})
-        api_history.append({"role": "assistant", "content": assistant_msg})
+    api_history = [{"role": m["role"], "content": m["content"]} for m in history]
 
     try:
         resp = requests.post(
@@ -148,14 +145,17 @@ def _render_history(entries: list[dict]) -> str:
 # ── Chat handler ───────────────────────────────────────────────────────────────
 def chat(
     question: str,
-    history: list[tuple[str, str]],
+    history: list[dict],
     show_sources: bool,
     query_history: list[dict],
-) -> tuple[list[tuple[str, str]], str, str, str, list[dict], str]:
+) -> tuple[list[dict], str, str, str, list[dict], str]:
     if not question.strip():
         return history, "", "", "", query_history, _render_history(query_history)
     answer, thinking_md, traces_md, sources_md = _query_backend(question, history)
-    history = history + [(question, answer)]
+    history = history + [
+        {"role": "user",      "content": question},
+        {"role": "assistant", "content": answer},
+    ]
 
     # Prepend to session history, keep last MAX_QUERY_HISTORY entries
     new_qhist = ([{
@@ -189,7 +189,6 @@ with gr.Blocks(title="Company Knowledge Assistant") as demo:
             chatbot = gr.Chatbot(
                 label="Conversation",
                 height=380,
-                type="tuples",
             )
             msg_box = gr.Textbox(
                 placeholder="Ask a question about company knowledge…",
