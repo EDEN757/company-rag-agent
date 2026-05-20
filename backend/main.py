@@ -278,6 +278,7 @@ class HistoryMessage(BaseModel):
 class QueryRequest(BaseModel):
     question: str
     history: list[HistoryMessage] = []
+    thinking_mode: bool = False
 
 class Source(BaseModel):
     doc_id: str
@@ -564,7 +565,7 @@ def _trace_result(name: str, result_text: str, hits: list) -> str:
 
 # ── Agent loop ─────────────────────────────────────────────────────────────────
 def run_agent(
-    question: str, history: list[HistoryMessage]
+    question: str, history: list[HistoryMessage], thinking_mode: bool = False
 ) -> tuple[str, list[dict], list[str], list[str]]:
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
     for h in history[-MAX_HISTORY_TURNS * 2:]:   # each turn = 2 messages (user + assistant)
@@ -583,7 +584,7 @@ def run_agent(
             tool_choice="auto",
             max_tokens=MAX_NEW_TOKENS,
             temperature=TEMPERATURE,
-            extra_body={"options": {"num_ctx": 32768}},
+            extra_body={"options": {"num_ctx": 32768, "think": thinking_mode}},
         )
         msg = resp.choices[0].message
         raw_content = msg.content or ""
@@ -594,8 +595,13 @@ def run_agent(
             thinking_steps.append(think_text)
 
         if not msg.tool_calls:
-            # Any remaining visible content before the answer counts as reasoning
-            return visible_content.strip(), all_sources, traces, thinking_steps
+            answer = visible_content.strip()
+            if not answer and thinking_steps:
+                # Model put everything in <think> — surface last reasoning block as answer
+                answer = thinking_steps[-1]
+            elif not answer:
+                answer = "The model did not produce an answer. Please try again."
+            return answer, all_sources, traces, thinking_steps
 
         # Capture inter-turn reasoning text (what the model says before calling tools)
         if visible_content.strip():
@@ -661,7 +667,7 @@ def query(req: QueryRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question must not be empty.")
     t0 = time.perf_counter()
-    answer, raw_sources, traces, thinking = run_agent(req.question, req.history)
+    answer, raw_sources, traces, thinking = run_agent(req.question, req.history, req.thinking_mode)
     latency = round((time.perf_counter() - t0) * 1000, 1)
 
     # Keep best search hit per doc_id; opened documents are always included

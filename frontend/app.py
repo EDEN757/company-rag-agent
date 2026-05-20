@@ -19,6 +19,7 @@ Environment variables (set in ~/.bashrc on the Frontend app):
 import html
 import os
 import re
+import urllib.parse
 
 import requests
 import gradio as gr
@@ -28,12 +29,12 @@ import uvicorn
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://nv-service-e4bb2876d3e69f18fd98d56e852aa814:8500").rstrip("/")
 
-MAX_QUERY_HISTORY = 5   # how many past queries to keep in the history panel
+MAX_QUERY_HISTORY = 5
 DOC_ID_RE = re.compile(r'\b(dsid_[a-f0-9]+)\b')
 
 CSS = """
 .thinking-panel { max-height: 300px; overflow-y: auto; padding-right: 4px; }
-.traces-panel   { max-height: 180px; overflow-y: auto; padding-right: 4px; }
+.results-panel  { max-height: 400px; overflow-y: auto; padding-right: 4px; }
 .history-panel  { max-height: 400px; overflow-y: auto; padding-right: 4px; }
 """
 
@@ -70,12 +71,11 @@ def _query_backend(
 ) -> tuple[str, str, str, str]:
     """Call /query and return (answer, thinking_md, traces_md, sources_md)."""
     api_history = [{"role": m["role"], "content": m["content"]} for m in history]
-    question_to_send = question + " /think" if enable_thinking else question
 
     try:
         resp = requests.post(
             f"{BACKEND_URL}/query",
-            json={"question": question_to_send, "history": api_history},
+            json={"question": question, "history": api_history, "thinking_mode": enable_thinking},
             timeout=300,
         )
         resp.raise_for_status()
@@ -83,7 +83,7 @@ def _query_backend(
     except requests.exceptions.ConnectionError:
         return "Cannot reach the backend. Make sure the Backend app is running.", "", "", "*No sources retrieved for this query.*"
     except requests.exceptions.Timeout:
-        return "Backend timed out (>180 s). The query may be too complex.", "", "", "*No sources retrieved for this query.*"
+        return "Backend timed out (>300 s). The query may be too complex.", "", "", "*No sources retrieved for this query.*"
     except Exception as e:
         return f"Error: {e}", "", "", "*No sources retrieved for this query.*"
 
@@ -109,15 +109,17 @@ def _query_backend(
         traces_md = f"**Agent steps** &nbsp;*(completed in {latency:.0f} ms)*\n\n{items}"
 
     # ── Sources ────────────────────────────────────────────────────────────────
+    q_encoded = urllib.parse.quote(question, safe="")
+
+    def _doc_link(doc_id: str) -> str:
+        eid = html.escape(doc_id)
+        return f'<a href="doc/{eid}?q={q_encoded}" target="_blank" rel="noopener"><code>{eid}</code></a>'
+
     sources_md = "*No sources retrieved for this query.*"
     if sources:
         opened  = [s for s in sources if s.get("opened")]
         found   = [s for s in sources if not s.get("opened")]
         lines: list[str] = []
-
-        def _doc_link(doc_id: str) -> str:
-            eid = html.escape(doc_id)
-            return f'<a href="doc/{eid}" target="_blank" rel="noopener"><code>{eid}</code></a>'
 
         if opened:
             lines.append("**Read in full:**\n")
@@ -148,7 +150,6 @@ def _query_backend(
 
 # ── Query history helpers ──────────────────────────────────────────────────────
 def _render_history(entries: list[dict]) -> str:
-    """Format the session query history as markdown (latest first)."""
     if not entries:
         return "*No previous queries in this session.*"
     parts = []
@@ -171,27 +172,33 @@ def chat(
     show_sources: bool,
     enable_thinking: bool,
     query_history: list[dict],
-) -> tuple[list[dict], str, str, str, list[dict], str]:
+) -> tuple[list[dict], str, str, list[dict], str]:
     if not question.strip():
-        return history, "", "", "", query_history, _render_history(query_history)
+        return history, "", "", query_history, _render_history(query_history)
     answer, thinking_md, traces_md, sources_md = _query_backend(question, history, enable_thinking)
     history = history + [
         {"role": "user",      "content": question},
         {"role": "assistant", "content": answer},
     ]
 
-    # Prepend to session history, keep last MAX_QUERY_HISTORY entries
     new_qhist = ([{
         "question":   question,
         "traces_md":  traces_md,
         "sources_md": sources_md,
     }] + query_history)[:MAX_QUERY_HISTORY]
 
+    # Combine agent steps + sources into a single collapsible panel
+    parts: list[str] = []
+    if traces_md:
+        parts.append(traces_md)
+    if show_sources:
+        parts.append(sources_md)
+    combined_md = "\n\n---\n\n".join(parts)
+
     return (
         history,
         thinking_md,
-        traces_md,
-        sources_md if show_sources else "",
+        combined_md,
         new_qhist,
         _render_history(new_qhist),
     )
@@ -225,22 +232,18 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
             show_sources    = gr.Checkbox(label="Show retrieved sources", value=True)
             enable_thinking = gr.Checkbox(label="Reasoning mode (slower — model thinks before answering)", value=False)
 
-        # ── Right column: reasoning + traces + sources + info ─────────────────
+        # ── Right column: reasoning + results + history + info ────────────────
         with gr.Column(scale=1):
             with gr.Accordion("Model reasoning", open=False):
                 thinking_box = gr.Markdown(
                     value="*Reasoning mode is off — enable the toggle to activate model thinking.*",
                     elem_classes=["thinking-panel"],
                 )
-            with gr.Accordion("Agent steps", open=True):
-                traces_box = gr.Markdown(
+            with gr.Accordion("Agent steps & sources", open=True):
+                results_box = gr.Markdown(
                     value="",
-                    elem_classes=["traces-panel"],
+                    elem_classes=["results-panel"],
                 )
-            sources_box = gr.Markdown(
-                value="*Sources will appear here after each query.*",
-                label="Sources",
-            )
             with gr.Accordion(f"Query history (last {MAX_QUERY_HISTORY})", open=False):
                 history_view = gr.Markdown(
                     "*No previous queries in this session.*",
@@ -266,23 +269,19 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
     submit_btn.click(
         fn=chat,
         inputs=[msg_box, chatbot, show_sources, enable_thinking, query_history_state],
-        outputs=[chatbot, thinking_box, traces_box, sources_box,
-                 query_history_state, history_view],
+        outputs=[chatbot, thinking_box, results_box, query_history_state, history_view],
     ).then(fn=lambda: "", outputs=msg_box)
 
     msg_box.submit(
         fn=chat,
         inputs=[msg_box, chatbot, show_sources, enable_thinking, query_history_state],
-        outputs=[chatbot, thinking_box, traces_box, sources_box,
-                 query_history_state, history_view],
+        outputs=[chatbot, thinking_box, results_box, query_history_state, history_view],
     ).then(fn=lambda: "", outputs=msg_box)
 
     clear_btn.click(
-        fn=lambda: ([], "*Reasoning mode is off — enable the toggle to activate model thinking.*", "",
-                    "*Sources will appear here after each query.*",
-                    [], "*No previous queries in this session.*"),
-        outputs=[chatbot, thinking_box, traces_box, sources_box,
-                 query_history_state, history_view],
+        fn=lambda: ([], "*Reasoning mode is off — enable the toggle to activate model thinking.*",
+                    "", [], "*No previous queries in this session.*"),
+        outputs=[chatbot, thinking_box, results_box, query_history_state, history_view],
     )
 
     refresh_btn.click(
@@ -294,9 +293,26 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
 # ── Document viewer ────────────────────────────────────────────────────────────
 fastapi_app = FastAPI()
 
+_HIGHLIGHT_JS = """
+<script>
+(function() {
+  const q = new URLSearchParams(window.location.search).get('q') || '';
+  if (!q) return;
+  const words = q.split(/\\s+/).filter(w => w.length > 3);
+  if (!words.length) return;
+  const pre = document.querySelector('pre');
+  if (!pre) return;
+  const escaped = words.map(w => w.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&'));
+  const pat = new RegExp('(' + escaped.join('|') + ')', 'gi');
+  pre.innerHTML = pre.innerHTML.replace(pat,
+    '<mark style="background:#ff9800;color:#000;border-radius:2px">$1</mark>');
+})();
+</script>
+"""
+
 
 @fastapi_app.get("/doc/{doc_id:path}", response_class=HTMLResponse)
-def view_document(doc_id: str):
+def view_document(doc_id: str, q: str = ""):
     try:
         r = requests.get(f"{BACKEND_URL}/document/{doc_id}", timeout=10)
         if r.status_code == 404:
@@ -334,6 +350,7 @@ def view_document(doc_id: str):
   <h1>{title}</h1>
   <div class="meta">Source type: <strong>{source}</strong> &nbsp;|&nbsp; ID: <code>{html.escape(doc_id)}</code></div>
   <pre>{content}</pre>
+  {_HIGHLIGHT_JS}
 </body>
 </html>"""
     return HTMLResponse(body)
