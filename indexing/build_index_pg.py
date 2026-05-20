@@ -146,8 +146,8 @@ def ingest_documents_and_chunks(conn, cur, df, rebuild: bool) -> None:
         if doc_id in known:
             continue
         st      = row.source_type
-        title   = row.title or ""
-        content = row.content or ""
+        title   = (row.title or "").replace("\x00", "")
+        content = (row.content or "").replace("\x00", "")
 
         cur.execute(
             f"INSERT INTO {TABLE_DOCS}(doc_id, source_type, title, content, metadata_json) "
