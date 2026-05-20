@@ -57,7 +57,7 @@ log = logging.getLogger(__name__)
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-LLM_MODEL   = os.environ.get("LLM_MODEL",   "qwen3-8b-32k")
+LLM_MODEL   = os.environ.get("LLM_MODEL",   "qwen3:8b")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 
 DB_HOST     = os.environ.get("PGHOST",     "nv-service-b01d63337fab32ac94f65eb2dc8a62ba")
@@ -579,6 +579,7 @@ def run_agent(
             tool_choice="auto",
             max_tokens=MAX_NEW_TOKENS,
             temperature=TEMPERATURE,
+            extra_body={"options": {"num_ctx": 32768}},
         )
         msg = resp.choices[0].message
         raw_content = msg.content or ""

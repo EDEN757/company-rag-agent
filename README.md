@@ -187,45 +187,58 @@ code — no environment variable configuration is needed unless they change.
 
 ### First-time setup
 
+Do these steps once. After this, use the [Starting up](#starting-up) guide.
+
 #### Step 1 — Start the Database app
 
 Start it in Nuvolos. No further configuration needed; pgvector is
 pre-installed and the indexer will create all tables.
 
-#### Step 2 — Install Ollama on the Backend app
+#### Step 2 — Install Ollama and pull models (Backend app)
 
-Open a terminal in the **Backend VS Code app** and run:
+Open a terminal in the **Backend VS Code app**. Ollama is not pre-installed
+and the system install script requires root, so download the binary directly:
 
 ```bash
-curl -fsSL https://ollama.ai/install.sh | sh
+# Download and install Ollama to user directory (no root needed)
+OLLAMA_VERSION=$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+mkdir -p ~/.local
+curl -fsSL "https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
+     -o /tmp/ollama.tar.zst
+tar -x --zstd -f /tmp/ollama.tar.zst -C ~/.local
 
-# Store models in shared LFS so they survive container restarts
+# Persist PATH and model storage location across sessions
+export PATH="$HOME/.local/bin:$PATH"
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 export OLLAMA_MODELS=/space_mounts/pars/ollama_models
+echo 'export OLLAMA_MODELS=/space_mounts/pars/ollama_models' >> ~/.bashrc
 
-ollama pull nomic-embed-text                       # 274 MB — embedding model
-ollama pull qwen3:8b                              # ~5 GB
-ollama create qwen3-8b-32k -f /files/Modelfile   # applies 32k context window
+# Start the server and pull models (~5.5 GB total)
+ollama serve &
+sleep 2
+ollama pull nomic-embed-text
+ollama pull qwen3:8b
+# Note: 32k context is passed via num_ctx in the API — no custom model needed
 ```
 
-Add `OLLAMA_MODELS=/space_mounts/pars/ollama_models` to the Backend app's
-**CONFIGURE → Environment Variables** panel so it persists across restarts.
-
-#### Step 3 — Index the data (run once from the Backend app)
-
-Upload `data/raw/documents_subset.parquet` to `/files/data/raw/` on the
-Backend app (or copy from shared storage), then:
+#### Step 3 — Clone the repo and index the data (Backend app)
 
 ```bash
 cd /files
+git clone -b Nuvolos https://github.com/andrernd/company-rag-agent.git
+```
+
+Upload `data/raw/documents_subset.parquet` to `/files/company-rag-agent/data/raw/`
+(or copy from shared storage), then:
+
+```bash
+cd /files/company-rag-agent
 pip install -r backend/requirements.txt pyarrow pandas
 python indexing/build_index_pg.py --input data/raw/documents_subset.parquet
 ```
 
-This reads the 10k-document Parquet file, runs it through the same chunkers
-as the local pipeline, embeds each chunk via `nomic-embed-text` through the
-Ollama server already running on the Backend container (768-dim, L2-normalized),
-and stores ~35k vectors in pgvector. Takes ~15–30 minutes depending on GPU.
-**Resumable** — re-run without `--rebuild` to continue after a crash or timeout.
+This chunks, embeds, and stores ~35k vectors in pgvector. Takes ~15–30 minutes.
+**Resumable** — re-run the same command to continue after a crash or timeout.
 
 Expected final output:
 
@@ -233,49 +246,62 @@ Expected final output:
 [done   ] indexing complete — Backend API is ready to serve queries.
 ```
 
-#### Step 4 — Start the backend
+#### Step 4 — Install frontend dependencies (Frontend app)
+
+Open a terminal in the **Frontend VS Code app** and run once:
 
 ```bash
-# Terminal 1 — keep Ollama running
-OLLAMA_MODELS=/space_mounts/pars/ollama_models ollama serve
+cd /files/company-rag-agent/frontend
+pip install -r requirements.txt
+```
 
-# Terminal 2 — start the API server
-cd /files/backend
+---
+
+### Starting up
+
+Run these every time you want to use the project. Make sure the Database app
+is started in Nuvolos first.
+
+**Backend app — Terminal 1** (keep open, runs Ollama):
+```bash
+source ~/.bashrc
+ollama serve
+```
+
+**Backend app — Terminal 2** (keep open, runs the API):
+```bash
+cd /files/company-rag-agent/backend
 uvicorn main:app --host 0.0.0.0 --port 8500
 ```
 
-Expected startup output:
-
+Expected output:
 ```
 INFO: Connecting to pgvector @ nv-service-b01d63337fab32ac94f65eb2dc8a62ba:5432/nuvolos
 INFO: pgvector connected — 35344 chunks indexed.
-INFO: LLM: http://localhost:11434  model=qwen3-8b-32k  embed=nomic-embed-text
+INFO: LLM: http://localhost:11434  model=qwen3:8b  embed=nomic-embed-text
 INFO: Application startup complete.
 INFO: Uvicorn running on http://0.0.0.0:8500
 ```
 
-#### Step 5 — Start the frontend
-
-Open a terminal in the **Frontend VS Code app** and run:
-
+**Frontend app** (keep open, serves the UI):
 ```bash
-cd /files/frontend
-pip install -r requirements.txt
+cd /files/company-rag-agent/frontend
 python app.py
 ```
 
 The UI is available at:
-
 ```
 https://<hash>.app.az.nuvolos.cloud/proxy/7860/
 ```
 
-#### Run the retrieval eval (optional)
+---
+
+### Optional — retrieval eval
 
 Same questions and metrics as the local eval, querying pgvector directly:
 
 ```bash
-cd /files
+cd /files/company-rag-agent
 python indexing/eval_retrieval_pg.py \
     --questions data/raw/questions_test.parquet \
     --top-k     10
@@ -289,10 +315,10 @@ python indexing/eval_retrieval_pg.py \
     --limit 100
 ```
 
-#### Re-chunk a source after editing chunkers.py (optional)
+### Optional — re-chunk a source after editing chunkers.py
 
 ```bash
-cd /files
+cd /files/company-rag-agent
 python indexing/rechunk_source_pg.py --source gmail
 ```
 
@@ -316,29 +342,13 @@ Qwen3's 32k context window.
 
 ---
 
-### Subsequent runs
-
-Data is already indexed. Start Ollama, then the backend, then the frontend:
-
-```bash
-# Backend app — Terminal 1
-OLLAMA_MODELS=/space_mounts/pars/ollama_models ollama serve
-
-# Backend app — Terminal 2
-cd /files/backend && uvicorn main:app --host 0.0.0.0 --port 8500
-
-# Frontend app
-cd /files/frontend && python app.py
-```
-
----
-
 ### Environment variables
 
-All values are already set as code defaults — only override if hostnames
-change or you want to swap models.
+All values are already set as code defaults — you only need to override them
+if hostnames change or you want to swap models. Set overrides in `~/.bashrc`
+on the relevant app (e.g. `export LLM_MODEL=qwen3:14b`).
 
-**Backend app (CONFIGURE → Environment Variables):**
+**Backend app (`~/.bashrc`):**
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -348,12 +358,12 @@ change or you want to swap models.
 | `PGPASSWORD` | `nuvolos` | DB password |
 | `PGDATABASE` | `nuvolos` | DB name |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
-| `LLM_MODEL` | `qwen3-8b-32k` | Model name in Ollama |
-| `OLLAMA_MODELS` | `/space_mounts/pars/ollama_models` | Shared Ollama model storage |
+| `LLM_MODEL` | `qwen3:8b` | Model name in Ollama (`num_ctx 32768` is passed via API) |
+| `OLLAMA_MODELS` | `/space_mounts/pars/ollama_models` | Shared Ollama model storage (set in Step 2) |
 | `EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model used by the backend API |
 | `RAG_EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model used by the indexer (`embed.py`) |
 
-**Frontend app (CONFIGURE → Environment Variables):**
+**Frontend app (`~/.bashrc`):**
 
 | Variable | Default | Purpose |
 |---|---|---|
