@@ -2,10 +2,11 @@
 
 A small, **hand-rolled** Retrieval-Augmented Generation agent for company
 knowledge — documents, emails, and chats — implemented from scratch without
-any integrated RAG framework. The agent calls two tools, `search` and
-`open_document`, on a hybrid BM25 + dense index over ~35,000 chunks built
-from a 10,000-document corpus spanning Slack, Gmail, Confluence, Linear,
-Jira, HubSpot, GitHub, Google Drive, and Fireflies.
+any integrated RAG framework. The agent calls six tools — `search`,
+`open_document`, `read`, `write`, `edit`, and `bash` — on a hybrid BM25 +
+dense index over ~35,000 chunks built from a 10,000-document corpus spanning
+Slack, Gmail, Confluence, Linear, Jira, HubSpot, GitHub, Google Drive, and
+Fireflies.
 
 Built for the **UZH FS2026 RAG** course. Every retrieval primitive — BM25,
 cosine similarity, weighted fusion, sliding-window and metadata-aware
@@ -17,17 +18,18 @@ the open-source models locally.
 ## Table of contents
 
 1. [What this is](#what-this-is)
-2. [Quick start](#quick-start)
-3. [System design](#system-design)
-4. [Retrieval pipeline](#retrieval-pipeline)
-5. [Chunking strategy](#chunking-strategy)
-6. [Tools exposed to the agent](#tools-exposed-to-the-agent)
-7. [The dataset](#the-dataset)
-8. [Evaluation](#evaluation)
-9. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
-10. [Course-pillar mapping](#course-pillar-mapping)
-11. [Project layout](#project-layout)
-12. [Known limitations and future work](#known-limitations-and-future-work)
+2. [Quick start — local](#quick-start--local)
+3. [Running on Nuvolos](#running-on-nuvolos)
+4. [System design](#system-design)
+5. [Retrieval pipeline](#retrieval-pipeline)
+6. [Chunking strategy](#chunking-strategy)
+7. [Tools exposed to the agent](#tools-exposed-to-the-agent)
+8. [The dataset](#the-dataset)
+9. [Evaluation](#evaluation)
+10. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
+11. [Course-pillar mapping](#course-pillar-mapping)
+12. [Project layout](#project-layout)
+13. [Known limitations and future work](#known-limitations-and-future-work)
 
 ---
 
@@ -48,9 +50,12 @@ It does this by:
    single SQLite index.
 3. Fusing both rankings with a weighted-sum scheme.
 4. Returning the top hits — each with a `doc_id`, a small preview, and a
-   score — to the LLM (Qwen 3.5 9B via Ollama).
+   score — to the LLM (Qwen 3 8B via Ollama).
 5. Letting the LLM call `open_document` to read the full text before it
    answers, and citing the `doc_id` it used.
+6. Additionally offering `read`, `write`, `edit`, and `bash` tools for
+   interacting with the host filesystem — useful for file operations during
+   a session.
 
 Optionally, the `search` tool accepts structured pre-filters
 (`source_types`, `date_from`, `date_to`, `participant`) so the agent can
@@ -60,7 +65,7 @@ by topic.
 
 ---
 
-## Quick start
+## Quick start — local
 
 ### Prerequisites
 
@@ -75,8 +80,8 @@ by topic.
 ```bash
 # Pull the open-source models.
 ollama pull nomic-embed-text          # 274 MB, 137M params, 768-dim, 8192-context
-ollama pull qwen2.5:9b                # 6.6 GB — adjust src/model.ts if you prefer
-                                      # a different small open model
+ollama pull qwen3:8b                  # ~5 GB
+ollama create qwen3-8b-32k -f Modelfile  # applies 32k context window
 
 # Python deps (the data/.venv is gitignored — make your own).
 python -m venv data/.venv
@@ -133,6 +138,246 @@ See [Evaluation](#evaluation) for what to expect.
 
 ---
 
+## Running on Nuvolos
+
+The project runs as three separate Nuvolos apps that share an instance-wide
+network. The local TypeScript TUI continues to work unchanged; this section
+describes the Python stack added for Nuvolos.
+
+### Architecture
+
+```
+Browser
+  │  HTTPS /proxy/7860/
+  ▼
+Frontend app  (Gradio, port 7860)       frontend/app.py
+  │  HTTP POST :8500/query
+  ▼
+Backend app   (FastAPI, port 8500)      backend/main.py
+  │  psycopg2 + pgvector               httpx → Ollama (nomic-embed-text, 768-dim)
+  │  Ollama /v1  (port 11434)          Qwen 3 8B  (≤8B open-source, local)
+  ▼
+Database app  (PostgreSQL + pgvector, port 5432)
+  hostname: nv-service-b01d63337fab32ac94f65eb2dc8a62ba
+```
+
+### App roles
+
+| Nuvolos app | What runs there | Internal port |
+|---|---|---|
+| **Database** | PostgreSQL + pgvector extension | 5432 |
+| **Backend** VS Code | Ollama + `uvicorn main:app` + `build_index_pg.py` | 8500 |
+| **Frontend** VS Code | `python app.py` (Gradio) | 7860 |
+| **Editor** | Exploration / file management only | isolated |
+
+> The **Editor** app is network-isolated and cannot reach the Database.
+> Always run the indexer and uvicorn from the **Backend** app.
+
+### Network hostnames
+
+These are fixed for this workspace and are already set as defaults in the
+code — no environment variable configuration is needed unless they change.
+
+| Service | Hardcoded default |
+|---|---|
+| Database (pgvector) | `nv-service-b01d63337fab32ac94f65eb2dc8a62ba` |
+| Backend API | `nv-service-e4bb2876d3e69f18fd98d56e852aa814` |
+
+---
+
+### First-time setup
+
+#### Step 1 — Start the Database app
+
+Start it in Nuvolos. No further configuration needed; pgvector is
+pre-installed and the indexer will create all tables.
+
+#### Step 2 — Install Ollama on the Backend app
+
+Open a terminal in the **Backend VS Code app** and run:
+
+```bash
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# Store models in shared LFS so they survive container restarts
+export OLLAMA_MODELS=/space_mounts/pars/ollama_models
+
+ollama pull nomic-embed-text                       # 274 MB — embedding model
+ollama pull qwen3:8b                              # ~5 GB
+ollama create qwen3-8b-32k -f /files/Modelfile   # applies 32k context window
+```
+
+Add `OLLAMA_MODELS=/space_mounts/pars/ollama_models` to the Backend app's
+**CONFIGURE → Environment Variables** panel so it persists across restarts.
+
+#### Step 3 — Index the data (run once from the Backend app)
+
+Upload `data/raw/documents_subset.parquet` to `/files/data/raw/` on the
+Backend app (or copy from shared storage), then:
+
+```bash
+cd /files
+pip install -r backend/requirements.txt pyarrow pandas
+python indexing/build_index_pg.py --input data/raw/documents_subset.parquet
+```
+
+This reads the 10k-document Parquet file, runs it through the same chunkers
+as the local pipeline, embeds each chunk via `nomic-embed-text` through the
+Ollama server already running on the Backend container (768-dim, L2-normalized),
+and stores ~35k vectors in pgvector. Takes ~15–30 minutes depending on GPU.
+**Resumable** — re-run without `--rebuild` to continue after a crash or timeout.
+
+Expected final output:
+
+```
+[done   ] indexing complete — Backend API is ready to serve queries.
+```
+
+#### Step 4 — Start the backend
+
+```bash
+# Terminal 1 — keep Ollama running
+OLLAMA_MODELS=/space_mounts/pars/ollama_models ollama serve
+
+# Terminal 2 — start the API server
+cd /files/backend
+uvicorn main:app --host 0.0.0.0 --port 8500
+```
+
+Expected startup output:
+
+```
+INFO: Connecting to pgvector @ nv-service-b01d63337fab32ac94f65eb2dc8a62ba:5432/nuvolos
+INFO: pgvector connected — 35344 chunks indexed.
+INFO: LLM: http://localhost:11434  model=qwen3-8b-32k  embed=nomic-embed-text
+INFO: Application startup complete.
+INFO: Uvicorn running on http://0.0.0.0:8500
+```
+
+#### Step 5 — Start the frontend
+
+Open a terminal in the **Frontend VS Code app** and run:
+
+```bash
+cd /files/frontend
+pip install -r requirements.txt
+python app.py
+```
+
+The UI is available at:
+
+```
+https://<hash>.app.az.nuvolos.cloud/proxy/7860/
+```
+
+#### Run the retrieval eval (optional)
+
+Same questions and metrics as the local eval, querying pgvector directly:
+
+```bash
+cd /files
+python indexing/eval_retrieval_pg.py \
+    --questions data/raw/questions_test.parquet \
+    --top-k     10
+```
+
+For a quick sanity check on the first 100 questions:
+
+```bash
+python indexing/eval_retrieval_pg.py \
+    --questions data/raw/questions_test.parquet \
+    --limit 100
+```
+
+#### Re-chunk a source after editing chunkers.py (optional)
+
+```bash
+cd /files
+python indexing/rechunk_source_pg.py --source gmail
+```
+
+### Gradio UI features
+
+The web interface at `/proxy/7860/` provides:
+
+| Panel | What it shows |
+|---|---|
+| **Conversation** | Full multi-turn chat; supports follow-up questions |
+| **Model reasoning** | Collapsed accordion. Displays Qwen3 `<think>…</think>` blocks and any inter-turn reasoning text the model emits before calling a tool |
+| **Agent steps** | Live trace of every tool call the agent made, e.g. `search("November invoice spike")` → `3 hits` |
+| **Sources** | Two sections: **Read in full** (documents opened via `open_document`) and **N retrieved chunks** (raw search hits with score and 200-char preview). Toggle with the "Show retrieved sources" checkbox |
+| **Query history** | Collapsed accordion keeping the last 5 queries with their agent steps and sources — resets on page refresh |
+| **System info** | Backend health (`/health`) + chunk count by source (`/stats`) with a Refresh button |
+
+**Context window cap:** the backend keeps the last `MAX_HISTORY_TURNS = 10`
+conversation turns (20 messages) in the LLM prompt. This bounds memory
+consumption to roughly 10–15k tokens regardless of session length, well within
+Qwen3's 32k context window.
+
+---
+
+### Subsequent runs
+
+Data is already indexed. Start Ollama, then the backend, then the frontend:
+
+```bash
+# Backend app — Terminal 1
+OLLAMA_MODELS=/space_mounts/pars/ollama_models ollama serve
+
+# Backend app — Terminal 2
+cd /files/backend && uvicorn main:app --host 0.0.0.0 --port 8500
+
+# Frontend app
+cd /files/frontend && python app.py
+```
+
+---
+
+### Environment variables
+
+All values are already set as code defaults — only override if hostnames
+change or you want to swap models.
+
+**Backend app (CONFIGURE → Environment Variables):**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PGHOST` | `nv-service-b01d63337fab32ac94f65eb2dc8a62ba` | pgvector hostname |
+| `PGPORT` | `5432` | pgvector port |
+| `PGUSER` | `nuvolos` | DB user |
+| `PGPASSWORD` | `nuvolos` | DB password |
+| `PGDATABASE` | `nuvolos` | DB name |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
+| `LLM_MODEL` | `qwen3-8b-32k` | Model name in Ollama |
+| `OLLAMA_MODELS` | `/space_mounts/pars/ollama_models` | Shared Ollama model storage |
+| `EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model used by the backend API |
+| `RAG_EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model used by the indexer (`embed.py`) |
+
+**Frontend app (CONFIGURE → Environment Variables):**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BACKEND_URL` | `http://nv-service-e4bb2876d3e69f18fd98d56e852aa814:8500` | Backend API URL |
+
+---
+
+### Local vs Nuvolos — what changed
+
+| Aspect | Local (TypeScript TUI) | Nuvolos (Python FastAPI + Gradio) |
+|---|---|---|
+| Database | SQLite (`data/index/rag.db`) | pgvector (PostgreSQL) |
+| Vector search | In-process `Float32Array` matmul | `<=>` cosine operator (pgvector) |
+| Keyword search | FTS5 `bm25()` (SQLite) | `tsvector` + `ts_rank` (PostgreSQL) |
+| Embedding model | `nomic-embed-text` via Ollama | `nomic-embed-text` via Ollama (same) |
+| LLM | Qwen 3 8B via Ollama | Qwen 3 8B via Ollama (same) |
+| Fusion weights | `0.7·vec + 0.3·kw`, threshold `0.35` | identical |
+| Agent tools | search, open\_document, read, write, edit, bash | identical |
+| Evaluation | `eval_retrieval.py` | `eval_retrieval_pg.py` (same metrics) |
+| Re-chunking | `rechunk_source.py` | `rechunk_source_pg.py` |
+| Interface | Terminal TUI | Gradio web UI at `/proxy/7860/` |
+
+---
+
 ## System design
 
 ```
@@ -142,7 +387,7 @@ See [Evaluation](#evaluation) for what to expect.
                 └─────────────────────────────┬──────────────────────────────┘
                                               │
                           ┌───────────────────┴───────────────────┐
-                          │  Qwen 3.5 9B (Ollama HTTP, /v1)        │
+                          │  Qwen 3 8B (Ollama HTTP, /v1)        │
                           │  system prompt: src/prompt.ts          │
                           └───┬──────────────────────────────┬─────┘
                               │ tool: search                 │ tool: open_document
@@ -379,9 +624,29 @@ Parameters:
 Returns the full document content prefixed with its `doc_id`, `source`,
 and `title` so the LLM can cite cleanly.
 
-Both tools are auto-allowed (`AUTO_ALLOWED` in `src/main.ts`) so the agent
-doesn't prompt the user before reading from the knowledge base. The
-filesystem tools (`read`, `write`, `edit`, `bash`) remain gated.
+`search` and `open_document` are auto-allowed in the TypeScript TUI
+(`AUTO_ALLOWED` in `src/main.ts`) — the agent reads from the knowledge base
+without prompting. In the Python/Nuvolos backend they are always available
+to the agent loop.
+
+### `read`
+
+Reads a UTF-8 text file from the Backend container filesystem (`/files/`).
+Used only when the user is asking about local files, not for knowledge queries.
+
+### `write`
+
+Writes UTF-8 text to a file, creating parent directories as needed.
+
+### `edit`
+
+Replaces the first exact occurrence of `old_string` with `new_string` in a
+file. Fails if the string is not found or appears more than once.
+
+### `bash`
+
+Runs a shell command via `/bin/bash`. Dangerous patterns (`rm -rf`, `sudo`,
+`dd if=`, etc.) are blocked server-side before execution.
 
 ---
 
@@ -432,9 +697,11 @@ re-chunked with the deterministic parser):
 
 ## Evaluation
 
-`indexing/eval_retrieval.py` re-implements the exact fusion math used by
-the TS tool (so tuning weights in one place is mirrored in the other) and
-computes Recall@k, MRR@k, and nDCG@k against `expected_doc_ids`.
+`indexing/eval_retrieval.py` (local) and `indexing/eval_retrieval_pg.py`
+(Nuvolos) re-implement the same fusion math and compute Recall@k, MRR@k, and
+nDCG@k against `expected_doc_ids`. Both use the same weights, threshold, and
+`nomic-embed-text` embedding — results will differ slightly because the keyword
+branch differs (FTS5 `bm25()` locally vs `ts_rank` on Nuvolos).
 
 On the first 100 questions of the gold set (baseline, no reranking):
 
@@ -530,12 +797,12 @@ repo:
 | Dense retrieval | W3 | `nomic-embed-text` via Ollama + cosine | `indexing/embed.py`, `src/rag/{db,embed,fusion}.ts` |
 | Hybrid retrieval | W3 hint | Weighted fusion `0.7·vec + 0.3·kw`, threshold 0.35 | `src/rag/fusion.ts` |
 | Chunking | W9 | Sliding window 500/50 + semantic per-source headers | `indexing/chunkers.py` |
-| LM decoding | W4 | Qwen 3.5 9B via Ollama OpenAI-compatible endpoint | `src/model.ts` |
+| LM decoding | W4 | Qwen 3 8B via Ollama OpenAI-compatible endpoint | `src/model.ts` |
 | LM prompting | W5 | System prompt with citation rules + ≤3-search cap | `src/prompt.ts` |
-| Open foundation models | W6 | Qwen 3.5 9B + nomic-embed-text (both open) | `src/model.ts`, `indexing/embed.py` |
+| Open foundation models | W6 | Qwen 3 8B + nomic-embed-text (both open) | `src/model.ts`, `indexing/embed.py` |
 | Production engineering | W9 | Resumable indexer, retries, payload-shrinking on 500s, ANALYZE/optimize | `indexing/build_index.py`, `indexing/embed.py` |
 | IR evaluation | W1, W2 | Recall@k, MRR@k, nDCG@k for k ∈ {1, 3, 5, 10} | `indexing/eval_retrieval.py` |
-| Frontend (W10) | W10 | pi-tui TUI with visible tool-call traces and citations | `src/main.ts` |
+| Frontend (W10) | W10 | TypeScript TUI (local) + Gradio web UI (Nuvolos) with reasoning accordion, agent step traces, sourced citations, and query history | `src/main.ts`, `frontend/app.py` |
 | Re-ranking | W9 | *Not yet implemented* — next step (cross-encoder) | — |
 
 ---
@@ -548,7 +815,15 @@ repo:
 ├── package.json               TS deps: pi-agent-core, pi-tui, better-sqlite3
 ├── package-lock.json
 ├── tsconfig.json
-├── Modelfile                  optional Ollama Modelfile for a custom qwen build
+├── Modelfile                  Ollama Modelfile — qwen3:8b with 32k context
+│
+├── backend/                   Python — Nuvolos FastAPI backend
+│   ├── main.py                FastAPI agent + hybrid retrieval + Ollama tool loop
+│   └── requirements.txt
+│
+├── frontend/                  Python — Nuvolos Gradio UI
+│   ├── app.py                 Gradio chat interface (port 7860, /proxy/7860)
+│   └── requirements.txt
 │
 ├── data/
 │   ├── raw/
@@ -558,21 +833,24 @@ repo:
 │   │   └── documents_test.parquet     (1.4 GB, gitignored)
 │   ├── .venv/                          (gitignored)
 │   └── index/
-│       └── rag.db                      (337 MB, gitignored)
+│       └── rag.db                      (337 MB, gitignored — local only)
 │
-├── indexing/                  Python — one-shot, resumable
-│   ├── schema.sql             documents | chunks | chunks_fts (FTS5) | meta
+├── indexing/                  Python — one-shot, resumable (shared by both targets)
+│   ├── schema.sql             SQLite schema (local): documents | chunks | FTS5 | meta
+│   ├── schema_pg.sql          pgvector schema (Nuvolos): rag_documents | rag_chunks | rag_meta
 │   ├── chunkers.py            per-source: gmail / slack / document-like
-│   ├── embed.py               Ollama embedding client, retry + payload shrink
-│   ├── build_index.py         end-to-end (commits every 200 chunks)
-│   ├── rechunk_source.py      re-do one source_type after a chunker change
-│   └── eval_retrieval.py      Recall@k / MRR@k / nDCG@k against the gold set
+│   ├── embed.py               Ollama embedding client, retry + payload shrink (shared: local + Nuvolos)
+│   ├── build_index.py         local indexer: Parquet → SQLite (commits every 200 chunks)
+│   ├── build_index_pg.py      Nuvolos indexer: Parquet → pgvector (nomic-embed-text via Ollama)
+│   ├── rechunk_source.py      re-do one source_type after a chunker change (local)
+│   ├── rechunk_source_pg.py   re-do one source_type after a chunker change (Nuvolos)
+│   ├── eval_retrieval.py      Recall@k / MRR@k / nDCG@k against the gold set (local)
+│   └── eval_retrieval_pg.py   Recall@k / MRR@k / nDCG@k against the gold set (Nuvolos)
 │
-└── src/                       TypeScript — the agent
+└── src/                       TypeScript — local agent (TUI, unchanged)
     ├── main.ts                pi-agent-core entrypoint + TUI
-    ├── prompt.ts              system prompt (workflow, ≤3 searches/q,
-    │                          citation format)
-    ├── model.ts               Ollama LLM config (Qwen 3.5 9B, openai-completions)
+    ├── prompt.ts              system prompt (workflow, ≤3 searches/q, citation format)
+    ├── model.ts               Ollama LLM config (Qwen 3 8B, openai-completions)
     ├── permissions.ts         interactive tool-call gating (read/write/edit/bash)
     ├── rag/
     │   ├── db.ts              better-sqlite3 read-only + Float32Array vectors
@@ -601,9 +879,6 @@ repo:
   per-message dates, so `date_from`/`date_to` filters silently exclude
   Slack. If we get a date-stamped Slack dump later, the chunker just needs
   to populate `ts_from`/`ts_to`.
-- **Embedding model is loaded at agent startup.** ~100 MB in memory.
-  Fine for local dev; if we host this we'd lazy-load or use a memory-mapped
-  format.
 - **LLM over-searches on terse questions.** The system prompt caps it at
   three `search` calls per question, but a stricter agent harness with a
   hard `maxToolIterations` would be cleaner. Tracked as a Qwen-side
@@ -618,7 +893,7 @@ repo:
 
 ## Credits and license
 
-- Models: `nomic-embed-text` (Apache-2.0, Nomic AI), Qwen 3.5 9B
+- Models: `nomic-embed-text` (Apache-2.0, Nomic AI), Qwen 3 8B
   (Apache-2.0, Alibaba), both served via Ollama.
 - Agent harness: [`@mariozechner/pi-agent-core`](https://www.npmjs.com/package/@mariozechner/pi-agent-core)
   and [`@mariozechner/pi-tui`](https://www.npmjs.com/package/@mariozechner/pi-tui)

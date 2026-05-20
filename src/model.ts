@@ -1,8 +1,8 @@
 import type { Model } from "@mariozechner/pi-ai";
 
 export const ollamaModel: Model<"openai-completions"> = {
-  id: "qwen3.5-9b-32k",
-  name: "Qwen 3.5 9B 32k (Ollama, custom)",
+  id: "qwen3-8b-32k",
+  name: "Qwen 3 8B 32k (Ollama, custom)",
   api: "openai-completions",
   provider: "ollama",
   baseUrl: "http://localhost:11434/v1",
