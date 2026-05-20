@@ -291,7 +291,7 @@ python app.py
 
 The UI is available at:
 ```
-https://<hash>.app.az.nuvolos.cloud/proxy/7860/
+https://<hash>.proxy-eu1.nuvolos.cloud/proxy/7860/
 ```
 
 ---

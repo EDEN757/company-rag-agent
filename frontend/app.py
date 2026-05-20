@@ -64,16 +64,16 @@ def _query_backend(
         resp = requests.post(
             f"{BACKEND_URL}/query",
             json={"question": question, "history": api_history},
-            timeout=90,
+            timeout=180,
         )
         resp.raise_for_status()
         data = resp.json()
     except requests.exceptions.ConnectionError:
-        return "Cannot reach the backend. Make sure the Backend app is running.", "", "", ""
+        return "Cannot reach the backend. Make sure the Backend app is running.", "", "", "*No sources retrieved for this query.*"
     except requests.exceptions.Timeout:
-        return "Backend timed out (>90 s). The query may be too complex.", "", "", ""
+        return "Backend timed out (>180 s). The query may be too complex.", "", "", "*No sources retrieved for this query.*"
     except Exception as e:
-        return f"Error: {e}", "", "", ""
+        return f"Error: {e}", "", "", "*No sources retrieved for this query.*"
 
     answer         = data.get("answer", "")
     sources        = data.get("sources", [])
@@ -188,7 +188,8 @@ with gr.Blocks(title="Company Knowledge Assistant") as demo:
         with gr.Column(scale=3):
             chatbot = gr.Chatbot(
                 label="Conversation",
-                height=520,
+                height=380,
+                type="tuples",
             )
             msg_box = gr.Textbox(
                 placeholder="Ask a question about company knowledge…",
