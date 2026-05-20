@@ -175,7 +175,7 @@ def chat(
 
 
 # ── Gradio UI ──────────────────────────────────────────────────────────────────
-with gr.Blocks(title="Company Knowledge Assistant", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="Company Knowledge Assistant") as demo:
     query_history_state = gr.State([])
     gr.Markdown(
         "# Company Knowledge Assistant\n"
@@ -189,7 +189,6 @@ with gr.Blocks(title="Company Knowledge Assistant", theme=gr.themes.Soft()) as d
             chatbot = gr.Chatbot(
                 label="Conversation",
                 height=520,
-                bubble_full_width=False,
             )
             msg_box = gr.Textbox(
                 placeholder="Ask a question about company knowledge…",
@@ -266,4 +265,5 @@ if __name__ == "__main__":
         server_name="0.0.0.0",   # bind to all interfaces in the container
         server_port=7860,
         root_path="/proxy/7860",  # Nuvolos HTTPS proxy path
+        theme=gr.themes.Soft(),
     )
