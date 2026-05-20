@@ -9,20 +9,30 @@ Run:
     python app.py
 
 Access via Nuvolos proxy:
-    https://<hash>.app.az.nuvolos.cloud/proxy/7860/
+    https://<hash>.proxy-eu1.nuvolos.cloud/proxy/7860/
 
-Environment variables (set in Nuvolos Frontend app CONFIGURE):
+Environment variables (set in ~/.bashrc on the Frontend app):
     BACKEND_URL   http://<backend-hostname>:8500
-                  (hostname shown in Backend app CONFIGURE page)
+                  (hostname shown in Backend app network info)
 """
 
+import html
 import os
+
 import requests
 import gradio as gr
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+import uvicorn
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://nv-service-e4bb2876d3e69f18fd98d56e852aa814:8500").rstrip("/")
 
 MAX_QUERY_HISTORY = 5   # how many past queries to keep in the history panel
+
+CSS = """
+.thinking-panel { max-height: 300px; overflow-y: auto; padding-right: 4px; }
+.history-panel  { max-height: 400px; overflow-y: auto; padding-right: 4px; }
+"""
 
 
 # ── Backend calls ──────────────────────────────────────────────────────────────
@@ -79,10 +89,11 @@ def _query_backend(
     thinking_steps = data.get("thinking_steps", [])
 
     # ── Model reasoning ────────────────────────────────────────────────────────
-    thinking_md = ""
     if thinking_steps:
         blocks = "\n\n---\n\n".join(thinking_steps)
         thinking_md = f"**Model reasoning:**\n\n{blocks}"
+    else:
+        thinking_md = "*No model reasoning captured for this query.*"
 
     # ── Agent step traces ──────────────────────────────────────────────────────
     traces_md = ""
@@ -100,22 +111,24 @@ def _query_backend(
         if opened:
             lines.append("**Read in full:**\n")
             for s in opened:
-                title = s.get("title") or s["doc_id"]
-                preview = s.get("preview", "")[:200]
+                title    = s.get("title") or s["doc_id"]
+                preview  = s.get("preview", "")[:200]
+                doc_link = f"[`{s['doc_id']}`](doc/{s['doc_id']})"
                 lines.append(
                     f"**{title}**\n"
-                    f"`{s['source_type']}` &nbsp; `{s['doc_id']}`\n"
+                    f"`{s['source_type']}` &nbsp; {doc_link}\n"
                     f"> {preview}…"
                 )
 
         if found:
             lines.append(f"**{len(found)} retrieved chunk(s):**\n")
             for i, s in enumerate(found, 1):
-                title   = s.get("title") or s["doc_id"]
-                preview = s.get("preview", "")[:200]
+                title    = s.get("title") or s["doc_id"]
+                preview  = s.get("preview", "")[:200]
+                doc_link = f"[`{s['doc_id']}`](doc/{s['doc_id']})"
                 lines.append(
                     f"**{i}. {title}**\n"
-                    f"`{s['source_type']}` &nbsp; score: `{s['score']}`\n"
+                    f"`{s['source_type']}` &nbsp; score: `{s['score']}` &nbsp; {doc_link}\n"
                     f"> {preview}…"
                 )
 
@@ -161,7 +174,7 @@ def chat(
     new_qhist = ([{
         "question":   question,
         "traces_md":  traces_md,
-        "sources_md": sources_md,  # always store in history regardless of checkbox
+        "sources_md": sources_md,
     }] + query_history)[:MAX_QUERY_HISTORY]
 
     return (
@@ -175,7 +188,7 @@ def chat(
 
 
 # ── Gradio UI ──────────────────────────────────────────────────────────────────
-with gr.Blocks(title="Company Knowledge Assistant") as demo:
+with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
     query_history_state = gr.State([])
     gr.Markdown(
         "# Company Knowledge Assistant\n"
@@ -204,7 +217,10 @@ with gr.Blocks(title="Company Knowledge Assistant") as demo:
         # ── Right column: reasoning + traces + sources + info ─────────────────
         with gr.Column(scale=1):
             with gr.Accordion("Model reasoning", open=False):
-                thinking_box = gr.Markdown(value="*Model reasoning will appear here.*")
+                thinking_box = gr.Markdown(
+                    value="*Model reasoning will appear here after your first query.*",
+                    elem_classes=["thinking-panel"],
+                )
             traces_box = gr.Markdown(
                 value="",
                 label="Agent steps",
@@ -214,7 +230,10 @@ with gr.Blocks(title="Company Knowledge Assistant") as demo:
                 label="Sources",
             )
             with gr.Accordion(f"Query history (last {MAX_QUERY_HISTORY})", open=False):
-                history_view = gr.Markdown("*No previous queries in this session.*")
+                history_view = gr.Markdown(
+                    "*No previous queries in this session.*",
+                    elem_classes=["history-panel"],
+                )
             with gr.Accordion("System info", open=False):
                 health_md   = gr.Markdown(_get_health())
                 stats_md    = gr.Markdown(_get_stats())
@@ -247,7 +266,7 @@ with gr.Blocks(title="Company Knowledge Assistant") as demo:
     ).then(fn=lambda: "", outputs=msg_box)
 
     clear_btn.click(
-        fn=lambda: ([], "*Model reasoning will appear here.*", "",
+        fn=lambda: ([], "*Model reasoning will appear here after your first query.*", "",
                     "*Sources will appear here after each query.*",
                     [], "*No previous queries in this session.*"),
         outputs=[chatbot, thinking_box, traces_box, sources_box,
@@ -260,10 +279,60 @@ with gr.Blocks(title="Company Knowledge Assistant") as demo:
     )
 
 
+# ── Document viewer ────────────────────────────────────────────────────────────
+fastapi_app = FastAPI()
+
+
+@fastapi_app.get("/doc/{doc_id:path}", response_class=HTMLResponse)
+def view_document(doc_id: str):
+    try:
+        r = requests.get(f"{BACKEND_URL}/document/{doc_id}", timeout=10)
+        if r.status_code == 404:
+            return HTMLResponse(
+                f"<h2>Document not found</h2><p><code>{html.escape(doc_id)}</code></p>",
+                status_code=404,
+            )
+        r.raise_for_status()
+        doc = r.json()
+    except Exception as e:
+        return HTMLResponse(
+            f"<h2>Error loading document</h2><p>{html.escape(str(e))}</p>",
+            status_code=502,
+        )
+
+    title   = html.escape(doc.get("title") or doc_id)
+    source  = html.escape(doc.get("source_type", ""))
+    content = html.escape(doc.get("content", ""))
+    body = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{title}</title>
+  <style>
+    body {{ font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; color: #222; }}
+    h1 {{ font-size: 1.4rem; margin-bottom: .25rem; }}
+    .meta {{ color: #666; font-size: .85rem; margin-bottom: 1.5rem; }}
+    pre {{ white-space: pre-wrap; word-break: break-word; background: #f6f8fa;
+           padding: 1rem; border-radius: 6px; font-size: .88rem; line-height: 1.5; }}
+    a {{ color: #0969da; }}
+  </style>
+</head>
+<body>
+  <a href="javascript:history.back()">&larr; Back</a>
+  <h1>{title}</h1>
+  <div class="meta">Source type: <strong>{source}</strong> &nbsp;|&nbsp; ID: <code>{html.escape(doc_id)}</code></div>
+  <pre>{content}</pre>
+</body>
+</html>"""
+    return HTMLResponse(body)
+
+
+app = gr.mount_gradio_app(fastapi_app, demo, path="/")
+
 if __name__ == "__main__":
-    demo.launch(
-        server_name="0.0.0.0",   # bind to all interfaces in the container
-        server_port=7860,
-        root_path="/proxy/7860",  # Nuvolos HTTPS proxy path
-        theme=gr.themes.Soft(),
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=7860,
+        root_path="/proxy/7860",
     )

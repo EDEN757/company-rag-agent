@@ -644,6 +644,14 @@ def stats():
             "by_source": {r[0]: r[1] for r in db_cur.fetchall()}}
 
 
+@app.get("/document/{doc_id}")
+def get_document(doc_id: str):
+    doc = fetch_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
+    return doc
+
+
 @app.post("/query", response_model=QueryResponse)
 def query(req: QueryRequest):
     if not req.question.strip():
