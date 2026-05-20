@@ -326,12 +326,15 @@ python indexing/rechunk_source_pg.py --source gmail
 
 The web interface at `/proxy/7860/` provides:
 
-| Panel | What it shows |
+| Panel / Control | What it does |
 |---|---|
-| **Conversation** | Full multi-turn chat; supports follow-up questions |
-| **Model reasoning** | Collapsed accordion. Displays Qwen3 `<think>…</think>` blocks and any inter-turn reasoning text the model emits before calling a tool |
-| **Agent steps** | Live trace of every tool call the agent made, e.g. `search("November invoice spike")` → `3 hits` |
-| **Sources** | Two sections: **Read in full** (documents opened via `open_document`) and **N retrieved chunks** (raw search hits with score and 200-char preview). Toggle with the "Show retrieved sources" checkbox |
+| **Conversation** | Full multi-turn chat; doc IDs in answers are clickable links opening the document viewer in a new tab |
+| **Send / Stop buttons** | Send submits the query. **Stop** cancels an in-progress search and adds "⚠️ Search interrupted by user." to the conversation |
+| **Show retrieved sources** | Checkbox. When enabled, retrieved chunks and opened documents appear in the Agent steps & sources panel |
+| **Reasoning mode** | Checkbox. Activates Qwen3's extended thinking (`/think` system-prompt token + `think: true` Ollama option). The model emits `<think>…</think>` blocks before answering; content appears in the Model reasoning accordion. Slower on CPU (~2–3 min), but produces more thorough answers for complex queries |
+| **Model reasoning** | Collapsed accordion. Shows Qwen3 thinking blocks and any inter-turn reasoning text the model emits before calling a tool |
+| **Agent steps & sources** | Open accordion. Shows every tool call trace (e.g. `search("invoice spike") → 3 result(s)`) plus retrieved chunks and full documents read |
+| **Document viewer** | Opens at `/doc/{doc_id}?q={query}`. Highlights the query terms that actually appear in the document, ranked by term-frequency — showing which words drove the BM25 retrieval score |
 | **Query history** | Collapsed accordion keeping the last 5 queries with their agent steps and sources — resets on page refresh |
 | **System info** | Backend health (`/health`) + chunk count by source (`/stats`) with a Refresh button |
 
@@ -376,12 +379,13 @@ on the relevant app (e.g. `export LLM_MODEL=qwen3:14b`).
 | Aspect | Local (TypeScript TUI) | Nuvolos (Python FastAPI + Gradio) |
 |---|---|---|
 | Database | SQLite (`data/index/rag.db`) | pgvector (PostgreSQL) |
-| Vector search | In-process `Float32Array` matmul | `<=>` cosine operator (pgvector) |
-| Keyword search | FTS5 `bm25()` (SQLite) | `tsvector` + `ts_rank` (PostgreSQL) |
+| Vector search | In-process `Float32Array` matmul | `<=>` cosine operator (pgvector), `ivfflat.probes=10` |
+| Keyword search | FTS5 `bm25()` (SQLite built-in) | OR-joined `to_tsquery` candidates → BM25 reranked in Python |
 | Embedding model | `nomic-embed-text` via Ollama | `nomic-embed-text` via Ollama (same) |
 | LLM | Qwen 3 8B via Ollama | Qwen 3 8B via Ollama (same) |
 | Fusion weights | `0.7·vec + 0.3·kw`, threshold `0.35` | identical |
-| Agent tools | search, open\_document, read, write, edit, bash | identical |
+| Max output tokens | 4096 | 2048 (balanced for CPU inference speed) |
+| Agent tools | search, open\_document, read, write, edit, bash | identical (read/write/edit support `~/` paths) |
 | Evaluation | `eval_retrieval.py` | `eval_retrieval_pg.py` (same metrics) |
 | Re-chunking | `rechunk_source.py` | `rechunk_source_pg.py` |
 | Interface | Terminal TUI | Gradio web UI at `/proxy/7860/` |
@@ -480,6 +484,14 @@ Each hit gets a score:
 ```
 kw_score = (1 / (1 + rank)) * 4    # rank = 1..8
 ```
+
+**On Nuvolos (pgvector):** PostgreSQL's `tsvector` does not expose a BM25
+function, so BM25 is computed in Python. The keyword branch fetches 3× more
+candidates than needed using OR-joined `to_tsquery` (any-word matching for
+maximum recall), then reranks them with a full BM25 implementation
+(k₁ = 1.5, b = 0.75, IDF × TF with length normalisation) and applies the
+same reciprocal-rank score formula. The end result fed into fusion is
+identical to the local branch.
 
 ### 3. Vector branch — dense retrieval (course pillar W3)
 
@@ -710,8 +722,10 @@ re-chunked with the deterministic parser):
 `indexing/eval_retrieval.py` (local) and `indexing/eval_retrieval_pg.py`
 (Nuvolos) re-implement the same fusion math and compute Recall@k, MRR@k, and
 nDCG@k against `expected_doc_ids`. Both use the same weights, threshold, and
-`nomic-embed-text` embedding — results will differ slightly because the keyword
-branch differs (FTS5 `bm25()` locally vs `ts_rank` on Nuvolos).
+`nomic-embed-text` embedding. The keyword branch now uses the same BM25
+algorithm on both targets (SQLite FTS5 built-in locally; OR-joined `to_tsquery`
+candidates reranked by Python BM25 on Nuvolos), so retrieval quality should be
+very close between the two.
 
 On the first 100 questions of the gold set (baseline, no reranking):
 
@@ -812,7 +826,7 @@ repo:
 | Open foundation models | W6 | Qwen 3 8B + nomic-embed-text (both open) | `src/model.ts`, `indexing/embed.py` |
 | Production engineering | W9 | Resumable indexer, retries, payload-shrinking on 500s, ANALYZE/optimize | `indexing/build_index.py`, `indexing/embed.py` |
 | IR evaluation | W1, W2 | Recall@k, MRR@k, nDCG@k for k ∈ {1, 3, 5, 10} | `indexing/eval_retrieval.py` |
-| Frontend (W10) | W10 | TypeScript TUI (local) + Gradio web UI (Nuvolos) with reasoning accordion, agent step traces, sourced citations, and query history | `src/main.ts`, `frontend/app.py` |
+| Frontend (W10) | W10 | TypeScript TUI (local) + Gradio web UI (Nuvolos) with reasoning mode toggle, stop button, agent step traces, sourced citations, clickable doc viewer with BM25-term highlighting, and query history | `src/main.ts`, `frontend/app.py` |
 | Re-ranking | W9 | *Not yet implemented* — next step (cross-encoder) | — |
 
 ---
