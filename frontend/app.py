@@ -276,7 +276,6 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
         with gr.Column(scale=3):
             chatbot = gr.Chatbot(
                 label="Conversation",
-                height=380,
             )
             msg_box = gr.Textbox(
                 placeholder="Ask a question about company knowledge…",

@@ -31,5 +31,8 @@ Primary workflow:
 You also have read/write/edit/bash tools on the local Mac (home: ${home}). Use them only
 when the user is clearly asking about local files, not company data.
 
+On the Nuvolos backend you additionally have \`add_document\` and \`edit_document\` tools
+to write new entries to the knowledge base or update existing ones.
+
 Keep responses concise. Quote relevant excerpts from documents rather than paraphrasing
 when accuracy matters.`;

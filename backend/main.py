@@ -34,6 +34,7 @@ Environment variables (set in Nuvolos Backend app CONFIGURE):
     PGDATABASE      nuvolos
 """
 
+import hashlib
 import math
 import os
 import re
@@ -41,6 +42,7 @@ import json
 import logging
 import subprocess
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -123,13 +125,24 @@ Primary workflow:
 3. Only call `search` a SECOND time if (a) the opened document is clearly off-topic,
    or (b) you need a different piece of information from a different source.
    Never run more than 3 searches total for one question.
-4. Always cite the doc_id(s) you used at the end of your answer, on a line like
-   "Source: dsid_..." — copy the id verbatim, never invent one.
+4. Always cite the doc_id(s) you used or created at the end of your answer, on a
+   line like "Source: dsid_..." — copy the id verbatim, never invent one.
+   After add_document or edit_document, always include the returned doc_id so the
+   user can open the document directly.
 5. If nothing relevant is found, say so plainly — do not fabricate.
+
+You can also write to and edit the knowledge base:
+- `add_document`: create a new document under any source type (gmail, slack,
+  confluence, jira, etc.) and index it immediately for search.
+- `edit_document`: update an existing document by doc_id and re-index it.
+
+Use these when the user asks to record, draft, save, or update something in the
+knowledge base — e.g. "write a gmail about the 29.05 meeting" or "edit that
+Confluence page to add the new API endpoint".
 
 You also have read, write, edit, and bash tools on the Backend container
 filesystem (/files/). Use them only when the user is clearly asking about local
-files or wants to create/modify something, not for knowledge queries.
+files, not for knowledge base operations.
 
 Keep responses concise. Quote relevant excerpts from documents rather than
 paraphrasing when accuracy matters.
@@ -179,6 +192,75 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "doc_id": {"type": "string", "description": "The doc_id string from a search result."},
+                },
+                "required": ["doc_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_document",
+            "description": (
+                "Create a new document in the company knowledge base and index it for search. "
+                "Use this when the user wants to add a note, memo, email draft, meeting summary, "
+                "or any content to the knowledge base under a specific source category."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_type": {
+                        "type": "string",
+                        "description": "Category for the document. One of: gmail, slack, confluence, google_drive, jira, linear, hubspot, github, fireflies.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Title of the document (e.g. email subject, page title, ticket name).",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Full text content to store and index.",
+                    },
+                    "participants": {
+                        "type": "string",
+                        "description": "Optional comma-separated list of participants (email addresses or names).",
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Optional ISO-8601 date for the document, e.g. 2026-05-29.",
+                    },
+                },
+                "required": ["source_type", "title", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_document",
+            "description": (
+                "Update the content of an existing document in the knowledge base and re-index it. "
+                "Use new_content to replace the entire document, or old_string + new_string for a targeted edit."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doc_id": {
+                        "type": "string",
+                        "description": "The doc_id of the document to edit (from a search result).",
+                    },
+                    "new_content": {
+                        "type": "string",
+                        "description": "Replacement for the entire document content.",
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "Exact text to find and replace (must appear exactly once in the document).",
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "Replacement text for old_string.",
+                    },
                 },
                 "required": ["doc_id"],
             },
@@ -500,6 +582,88 @@ def fetch_document(doc_id: str) -> dict | None:
     return {"doc_id": row[0], "source_type": row[1], "title": row[2], "content": row[3]}
 
 
+# ── Knowledge-base write helpers ──────────────────────────────────────────────
+def _new_doc_id() -> str:
+    return "dsid_" + hashlib.md5(uuid.uuid4().bytes).hexdigest()
+
+
+def _simple_chunk(text: str, chunk_size: int = 2000, overlap: int = 200) -> list[str]:
+    if len(text) <= chunk_size:
+        return [text]
+    chunks, start = [], 0
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        chunks.append(text[start:end])
+        if end == len(text):
+            break
+        start += chunk_size - overlap
+    return chunks
+
+
+def _insert_chunks(cur, doc_id: str, source_type: str, title: str, content: str,
+                   participants: str | None, ts_from: str | None, ts_to: str | None):
+    participants_json = (
+        json.dumps([p.strip() for p in participants.split(",")]) if participants else "[]"
+    )
+    for chunk_text in _simple_chunk(content):
+        header_parts = [f"[source: {source_type}]", f"[title: {title}]"]
+        if participants:
+            header_parts.append(f"[participants: {participants}]")
+        if ts_from:
+            date_str = ts_from + (f" -> {ts_to}" if ts_to and ts_to != ts_from else "")
+            header_parts.append(f"[dates: {date_str}]")
+        full_text = " ".join(header_parts) + "\n\n" + chunk_text
+        embedding = _embed(full_text)
+        cur.execute(
+            f"""INSERT INTO {TABLE_CHUNKS}
+                (doc_id, source_type, text, ts_from, ts_to, participants_json, embedding, text_tsv)
+                VALUES (%s, %s, %s, %s, %s, %s, %s::vector, to_tsvector('english', %s))""",
+            (doc_id, source_type, full_text, ts_from, ts_to, participants_json, embedding, full_text),
+        )
+
+
+def db_add_document(source_type: str, title: str, content: str,
+                    participants: str | None = None, date: str | None = None) -> str:
+    doc_id = _new_doc_id()
+    ts = date or None
+    cur = db_conn.cursor()
+    try:
+        cur.execute(
+            f"INSERT INTO {TABLE_DOCS} (doc_id, source_type, title, content) VALUES (%s, %s, %s, %s)",
+            (doc_id, source_type, title, content),
+        )
+        _insert_chunks(cur, doc_id, source_type, title, content, participants, ts, ts)
+    finally:
+        cur.close()
+    return doc_id
+
+
+def db_edit_document(doc_id: str, new_content: str | None = None,
+                     old_string: str | None = None, new_string: str | None = None) -> str:
+    doc = fetch_document(doc_id)
+    if not doc:
+        return f"Document not found: {doc_id}"
+    if new_content is not None:
+        updated = new_content
+    elif old_string is not None and new_string is not None:
+        count = doc["content"].count(old_string)
+        if count == 0:
+            return f"old_string not found in {doc_id}"
+        if count > 1:
+            return f"old_string appears {count} times — make it more specific"
+        updated = doc["content"].replace(old_string, new_string, 1)
+    else:
+        return "Provide either new_content or both old_string and new_string."
+    cur = db_conn.cursor()
+    try:
+        cur.execute(f"UPDATE {TABLE_DOCS} SET content = %s WHERE doc_id = %s", (updated, doc_id))
+        cur.execute(f"DELETE FROM {TABLE_CHUNKS} WHERE doc_id = %s", (doc_id,))
+        _insert_chunks(cur, doc_id, doc["source_type"], doc["title"] or "", updated, None, None, None)
+    finally:
+        cur.close()
+    return f"Updated {doc_id} and re-indexed."
+
+
 # ── Tool execution ─────────────────────────────────────────────────────────────
 def execute_tool(name: str, args: dict) -> tuple[str, list[dict]]:
     """Returns (text_for_llm, search_hits_for_sources)."""
@@ -553,6 +717,45 @@ def execute_tool(name: str, args: dict) -> tuple[str, list[dict]]:
             f"doc_id: {doc['doc_id']}\nsource: {doc['source_type']}\n"
             f"title: {doc['title'] or ''}\n\n{doc['content']}"
         ), [source_hit]
+
+    if name == "add_document":
+        doc_id = db_add_document(
+            source_type=args["source_type"],
+            title=args["title"],
+            content=args["content"],
+            participants=args.get("participants"),
+            date=args.get("date"),
+        )
+        source_hit = {
+            "chunk_id": -1, "doc_id": doc_id,
+            "source_type": args["source_type"], "title": args["title"],
+            "score": 0.0, "vec_score": 0.0, "kw_score": 0.0,
+            "preview": args["content"][:320].replace("\n", " ").strip(),
+            "ts_from": args.get("date"), "ts_to": args.get("date"), "opened": True,
+        }
+        return (
+            f"Created and indexed {doc_id} "
+            f"(source={args['source_type']}, title={args['title']!r}). "
+            f"Include {doc_id} in your answer."
+        ), [source_hit]
+
+    if name == "edit_document":
+        result = db_edit_document(
+            doc_id=args["doc_id"],
+            new_content=args.get("new_content"),
+            old_string=args.get("old_string"),
+            new_string=args.get("new_string"),
+        )
+        doc = fetch_document(args["doc_id"])
+        source_hit = {
+            "chunk_id": -1, "doc_id": args["doc_id"],
+            "source_type": doc["source_type"] if doc else "",
+            "title": doc["title"] if doc else args["doc_id"],
+            "score": 0.0, "vec_score": 0.0, "kw_score": 0.0,
+            "preview": (doc["content"][:320].replace("\n", " ").strip()) if doc else "",
+            "ts_from": None, "ts_to": None, "opened": True,
+        }
+        return result + f" Include {args['doc_id']} in your answer.", [source_hit]
 
     if name == "read":
         path = os.path.expanduser(args["path"])
@@ -620,6 +823,10 @@ def _trace_args(name: str, args: dict) -> str:
         return f'"{q}"' + (f" ({', '.join(extras)})" if extras else "")
     if name == "open_document":
         return args.get("doc_id", "")
+    if name == "add_document":
+        return f"{args.get('source_type', '')} / {args.get('title', '')[:50]}"
+    if name == "edit_document":
+        return args.get("doc_id", "")
     if name in ("read", "write", "edit"):
         return args.get("path", "")
     if name == "bash":
@@ -632,6 +839,11 @@ def _trace_result(name: str, result_text: str, hits: list) -> str:
         return f"{len(hits)} result(s)" if hits else "no results"
     if name == "open_document":
         return "not found" if result_text.startswith("No document") else f"{len(result_text):,} chars"
+    if name == "add_document":
+        m = re.search(r'dsid_[a-f0-9]+', result_text)
+        return m.group(0) if m else "created"
+    if name == "edit_document":
+        return "updated" if "Updated" in result_text else result_text[:40]
     if name == "bash":
         m = re.match(r"exit=(\d+)", result_text)
         return f"exit={m.group(1)}" if m else "done"
