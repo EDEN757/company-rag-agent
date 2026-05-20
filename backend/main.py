@@ -140,6 +140,11 @@ Use these when the user asks to record, draft, save, or update something in the
 knowledge base — e.g. "write a gmail about the 29.05 meeting" or "edit that
 Confluence page to add the new API endpoint".
 
+IMPORTANT for write tasks: call `add_document` in your FIRST tool call — do NOT
+narrate your plan or write a preamble first. Keep the document content concise
+(1–3 short paragraphs, under 150 words) unless the user explicitly asks for more.
+Writing on CPU is slow; brevity is essential.
+
 You also have read, write, edit, and bash tools on the Backend container
 filesystem (/files/). Use them only when the user is clearly asking about local
 files, not for knowledge base operations.
