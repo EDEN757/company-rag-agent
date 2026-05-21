@@ -419,22 +419,25 @@ on the relevant app (e.g. `export LLM_MODEL=qwen3:14b`).
 
 ### Quick reference — what to run every time
 
-Start the **Database app** in Nuvolos first, then open two terminals in the **Backend VS Code app**:
+Start the **Database app** in Nuvolos first, then open two terminals in the **Backend VS Code app**.
+
+**Terminal 1 — Ollama:**
 
 ```bash
-# Terminal 1 — every time you open a new terminal, run this first:
-source ~/.bashrc
+export PATH="/files/bin:$PATH"
 
-# Then start Ollama (CPU):
+# CPU:
 ollama serve
 
-# Or GPU (Tesla T4) — faster by ~10×:
+# GPU (Tesla T4) — faster by ~10×:
 OLLAMA_FLASH_ATTENTION=1 CUDA_VISIBLE_DEVICES=0 ollama serve
 ```
 
+**Terminal 2 — web server:**
+
 ```bash
-# Terminal 2 — web server:
-source ~/.bashrc
+export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh"
+nvm use 22
 cd /files/company-rag-agent
 npm run web
 ```
@@ -444,8 +447,9 @@ Open the UI at:
 https://<your-hash>.proxy-eu1.nuvolos.cloud/proxy/8500/
 ```
 
-> **Important:** `source ~/.bashrc` is required in every new terminal. Without it,
-> `ollama`, `node`, and `npm` commands will not be found.
+> **Why explicit exports?** Nuvolos terminals start with the conda base
+> environment active. `source ~/.bashrc` alone does not always load the
+> `/files/bin` PATH or nvm — use the explicit exports above to be safe.
 
 ---
 
@@ -556,10 +560,10 @@ after pulling an update that adds new dependencies).
 When new code is pushed to the repo, update your local copy:
 
 ```bash
-source ~/.bashrc
+export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh"
+nvm use 22
 cd /files/company-rag-agent
-git fetch https://github.com/EDEN757/company-rag-agent.git andre-dev
-git reset --hard FETCH_HEAD
+git pull
 npm install   # only needed if package.json changed
 ```
 
