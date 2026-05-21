@@ -336,7 +336,25 @@ _LINK_FIX_JS = """
   }
 
   function getPanel() {
-    return document.querySelector('.results-panel .prose');
+    // .prose is only rendered when Markdown has content; fall back to wrapper,
+    // then create an overlay div if neither exists yet (e.g. very first load).
+    return (
+      document.querySelector('.results-panel .prose') ||
+      document.querySelector('.results-panel') ||
+      (function() {
+        let el = document.getElementById('_agent_traces');
+        if (!el) {
+          el = document.createElement('div');
+          el.id = '_agent_traces';
+          el.style.cssText = 'position:fixed;top:70px;right:24px;max-width:380px;' +
+            'background:#1e1e2e;border:1px solid #555;border-radius:10px;' +
+            'padding:12px 16px;z-index:9999;font-size:12px;color:#ccc;' +
+            'box-shadow:0 4px 16px rgba(0,0,0,.5);line-height:1.5';
+          document.body.appendChild(el);
+        }
+        return el;
+      })()
+    );
   }
 
   function renderTraces(d) {
@@ -438,7 +456,7 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS, head=_LINK_FIX_JS) 
                 )
             with gr.Accordion("Agent steps & sources", open=True):
                 results_box = gr.Markdown(
-                    value="",
+                    value="*Send a query to see agent steps here.*",
                     elem_classes=["results-panel"],
                 )
             with gr.Accordion(f"Query history (last {MAX_QUERY_HISTORY})", open=False):
