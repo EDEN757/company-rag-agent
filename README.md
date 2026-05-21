@@ -46,8 +46,7 @@ internal communication, e.g.:
 It does this by:
 
 1. Embedding the question with `nomic-embed-text`.
-2. Running BM25 (SQLite FTS5) and dense cosine search in parallel against a
-   single SQLite index.
+2. Running BM25 and dense cosine search in parallel against pgvector.
 3. Fusing both rankings with a weighted-sum scheme.
 4. Returning the top hits — each with a `doc_id`, a small preview, and a
    score — to the LLM (Qwen 3 8B via Ollama).
@@ -67,21 +66,26 @@ by topic.
 
 ## Quick start — local
 
+> **Note:** The original TypeScript TUI (Node.js / SQLite) has been moved to
+> `typescript_deprecated/`. The primary solution is now the Python stack
+> running on Nuvolos — see [Running on Nuvolos](#running-on-nuvolos).
+> The steps below are kept for reference if you want to run the TypeScript
+> agent locally.
+
 ### Prerequisites
 
 - macOS or Linux
-- [Ollama](https://ollama.ai) installed and running locally (default port
-  11434)
-- Python 3.11+ (for the indexer and eval harness)
-- Node.js 22+ and `npm` (for the agent)
+- [Ollama](https://ollama.ai) installed and running locally (default port 11434)
+- Python 3.11+ (for the indexer)
+- Node.js 22+ and `npm`
 
 ### One-time setup
 
 ```bash
 # Pull the open-source models.
-ollama pull nomic-embed-text          # 274 MB, 137M params, 768-dim, 8192-context
-ollama pull qwen3:8b                  # ~5 GB
-ollama create qwen3-8b-32k -f Modelfile  # applies 32k context window
+ollama pull nomic-embed-text
+ollama pull qwen3:8b
+ollama create qwen3-8b-32k -f typescript_deprecated/Modelfile
 
 # Python deps (the data/.venv is gitignored — make your own).
 python -m venv data/.venv
@@ -89,60 +93,32 @@ source data/.venv/bin/activate
 pip install pyarrow numpy httpx pandas
 
 # Node deps.
-npm install
+cd typescript_deprecated && npm install && cd ..
 ```
 
 ### Build the index
 
 ```bash
 source data/.venv/bin/activate
-python indexing/build_index.py \
+python typescript_deprecated/indexing/build_index.py \
     --input data/raw/documents_subset.parquet \
     --out   data/index/rag.db
 ```
 
-Expect ~22 minutes on Apple Silicon (~25 chunks/sec from the embedder).
-The indexer is **resumable**: it commits embeddings every 200 chunks, so if
-Ollama 500s mid-run, rerunning the same command picks up exactly where it
-left off. The final `rag.db` is ~337 MB (33,827 vectors + FTS index + raw
-chunk text).
-
-### Try it from the CLI without the TUI
-
-```bash
-npx tsx src/rag/smoke.ts "who complained about the November invoice spike from HybridAI?"
-```
-
-You should see the relevant Gmail thread as the top hit with `score ≈ 2.6`,
-followed by related invoice-spike threads from different companies.
-
 ### Run the agent
 
 ```bash
-npm start
+cd typescript_deprecated && npm start
 ```
 
-A TUI opens. Ask anything. The agent calls `search`, optionally
-`open_document`, and cites the `doc_id`. Type `/quit` to exit.
-
-### Run the retrieval eval
-
-```bash
-python indexing/eval_retrieval.py \
-    --db        data/index/rag.db \
-    --questions data/raw/questions_test.parquet \
-    --top-k     10
-```
-
-See [Evaluation](#evaluation) for what to expect.
+A TUI opens. Ask anything. Type `/quit` to exit.
 
 ---
 
 ## Running on Nuvolos
 
 The project runs as three separate Nuvolos apps that share an instance-wide
-network. The local TypeScript TUI continues to work unchanged; this section
-describes the Python stack added for Nuvolos.
+network. The Python stack described here is the primary solution.
 
 ### Architecture
 
@@ -302,9 +278,16 @@ https://<hash>.proxy-eu1.nuvolos.cloud/proxy/7860/
 
 ---
 
-### Optional — retrieval eval
+### Optional — evaluation
 
-Same questions and metrics as the local eval, querying pgvector directly:
+Two evaluation scripts are available. Both read `data/raw/questions_test.parquet`
+(500 gold questions with `expected_doc_ids` and `answer_facts`).
+
+#### Level 1 — Retrieval quality (`eval_retrieval_pg.py`)
+
+Measures whether the right document appears in the top-k fused results.
+Does **not** start the agent or call the LLM — fast (~500 questions in a few
+minutes). Metrics: Recall@k, MRR@k, nDCG@k for k ∈ {1, 3, 5, 10}.
 
 ```bash
 cd /files/company-rag-agent
@@ -313,12 +296,33 @@ python indexing/eval_retrieval_pg.py \
     --top-k     10
 ```
 
-For a quick sanity check on the first 100 questions:
+Quick sanity check on the first 100 questions:
 
 ```bash
-python indexing/eval_retrieval_pg.py \
-    --questions data/raw/questions_test.parquet \
-    --limit 100
+python indexing/eval_retrieval_pg.py --limit 100
+```
+
+#### Level 2 — End-to-end agent quality (`eval_agent.py`)
+
+Sends each question through the live `/query` endpoint (uvicorn must be
+running) and measures:
+
+- **Source hit rate** — did the agent cite an `expected_doc_id` in its
+  returned sources?
+- **Fact coverage** — what fraction of the gold `answer_facts` keywords
+  appear in the LLM's response? (token-overlap check, no extra LLM call)
+
+Results are broken down by `question_type` (basic, multi-hop, etc.).
+
+> **Note:** each question goes through the full agent loop (embedding →
+> search → LLM). On CPU this takes 2–5 min per question — use `--limit`
+> for a representative sample.
+
+```bash
+# Make sure uvicorn is running in Terminal 2 first, then:
+cd /files/company-rag-agent
+python indexing/eval_agent.py --limit 20          # quick smoke test
+python indexing/eval_agent.py                     # full 500 questions
 ```
 
 ### Optional — re-chunk a source after editing chunkers.py
@@ -392,7 +396,7 @@ on the relevant app (e.g. `export LLM_MODEL=qwen3:14b`).
 | Fusion weights | `0.7·vec + 0.3·kw`, threshold `0.35` | identical |
 | Max output tokens | 4096 | 2048 (balanced for CPU inference speed) |
 | Agent tools | search, open\_document, read, write, edit, bash | identical (read/write/edit support `~/` paths) |
-| Evaluation | `eval_retrieval.py` | `eval_retrieval_pg.py` (same metrics) |
+| Evaluation | `eval_retrieval.py` (in `typescript_deprecated/`) | `eval_retrieval_pg.py` + `eval_agent.py` |
 | Re-chunking | `rechunk_source.py` | `rechunk_source_pg.py` |
 | Interface | Terminal TUI | Gradio web UI at `/proxy/7860/` |
 
@@ -725,13 +729,15 @@ re-chunked with the deterministic parser):
 
 ## Evaluation
 
-`indexing/eval_retrieval.py` (local) and `indexing/eval_retrieval_pg.py`
-(Nuvolos) re-implement the same fusion math and compute Recall@k, MRR@k, and
-nDCG@k against `expected_doc_ids`. Both use the same weights, threshold, and
-`nomic-embed-text` embedding. The keyword branch now uses the same BM25
-algorithm on both targets (SQLite FTS5 built-in locally; OR-joined `to_tsquery`
-candidates reranked by Python BM25 on Nuvolos), so retrieval quality should be
-very close between the two.
+Two scripts evaluate different layers of the pipeline against the 500-question
+gold set (`data/raw/questions_test.parquet`). Both run on Nuvolos against
+pgvector.
+
+### Level 1 — Retrieval quality (`eval_retrieval_pg.py`)
+
+Re-implements the same fusion math (BM25 + pgvector, 0.7/0.3 weights,
+threshold 0.35) and computes Recall@k, MRR@k, nDCG@k for k ∈ {1, 3, 5, 10}
+against `expected_doc_ids`. Does not start the LLM — runs in a few minutes.
 
 On the first 100 questions of the gold set (baseline, no reranking):
 
@@ -742,11 +748,23 @@ On the first 100 questions of the gold set (baseline, no reranking):
 | 5 | 0.740 | 0.696 | 0.707 |
 | 10 | **0.930** | 0.720 | 0.767 |
 
-Recall@10 of 0.93 means the right document is in the agent's working set
-on 93 % of queries — a strong baseline before adding the cross-encoder
-reranker (course pillar W9, planned next).
+Recall@10 of 0.93 means the right document is in the agent's working set on
+93 % of queries — a strong baseline before adding a cross-encoder reranker.
 
-Two questions we sanity-checked end-to-end through the live agent:
+### Level 2 — End-to-end agent quality (`eval_agent.py`)
+
+Sends every question through the live `/query` endpoint and checks:
+
+- **Source hit rate** — did the agent cite an `expected_doc_id` in its
+  returned sources? (measures whether the agent actually used the right doc)
+- **Fact coverage** — what fraction of the gold `answer_facts` keywords
+  appear in the LLM's response? (token-overlap, no extra LLM call needed)
+
+Results are broken down by `question_type`. Requires uvicorn to be running.
+Each question goes through the full LLM loop, so allow ~2–5 min per question
+on CPU — use `--limit 50` for a representative quick run.
+
+Two questions sanity-checked end-to-end through the live agent:
 
 - **qst_0010** (GitHub, "How does the new alerting approach group
   model-serving requests…"): agent returned the gold doc on the first
@@ -823,16 +841,17 @@ repo:
 
 | Pillar | Slide source | Implementation | File |
 |---|---|---|---|
-| Sparse retrieval | W1, W2 | SQLite FTS5 + `bm25()` | `indexing/schema.sql`, `src/rag/fusion.ts` |
-| Dense retrieval | W3 | `nomic-embed-text` via Ollama + cosine | `indexing/embed.py`, `src/rag/{db,embed,fusion}.ts` |
-| Hybrid retrieval | W3 hint | Weighted fusion `0.7·vec + 0.3·kw`, threshold 0.35 | `src/rag/fusion.ts` |
+| Sparse retrieval | W1, W2 | OR-joined `to_tsquery` candidates reranked by Python BM25 (k₁=1.5, b=0.75) | `indexing/schema_pg.sql`, `backend/bm25.py`, `backend/fusion.py` |
+| Dense retrieval | W3 | `nomic-embed-text` via Ollama + pgvector cosine (`<=>`) | `indexing/embed.py`, `backend/embed.py`, `backend/fusion.py` |
+| Hybrid retrieval | W3 hint | Weighted fusion `0.7·vec + 0.3·kw`, threshold 0.35 | `backend/fusion.py`, `backend/config.py` |
 | Chunking | W9 | Sliding window 500/50 + semantic per-source headers | `indexing/chunkers.py` |
-| LM decoding | W4 | Qwen 3 8B via Ollama OpenAI-compatible endpoint | `src/model.ts` |
-| LM prompting | W5 | System prompt with citation rules + ≤3-search cap | `src/prompt.ts` |
-| Open foundation models | W6 | Qwen 3 8B + nomic-embed-text (both open) | `src/model.ts`, `indexing/embed.py` |
-| Production engineering | W9 | Resumable indexer, retries, payload-shrinking on 500s, ANALYZE/optimize | `indexing/build_index.py`, `indexing/embed.py` |
-| IR evaluation | W1, W2 | Recall@k, MRR@k, nDCG@k for k ∈ {1, 3, 5, 10} | `indexing/eval_retrieval.py` |
-| Frontend (W10) | W10 | TypeScript TUI (local) + Gradio web UI (Nuvolos) with reasoning mode toggle, stop button, agent step traces, sourced citations, clickable doc viewer with BM25-term highlighting, and query history | `src/main.ts`, `frontend/app.py` |
+| LM decoding | W4 | Qwen 3 8B via Ollama OpenAI-compatible endpoint (`num_ctx 32768`) | `backend/config.py`, `backend/agent.py` |
+| LM prompting | W5 | System prompt with citation rules + ≤3-search cap | `backend/prompt.py` |
+| Open foundation models | W6 | Qwen 3 8B + nomic-embed-text (both open, served via Ollama) | `backend/config.py`, `indexing/embed.py` |
+| Production engineering | W9 | Resumable indexer, retries, payload-shrinking on 500s | `indexing/build_index_pg.py`, `indexing/embed.py` |
+| IR evaluation | W1, W2 | Recall@k, MRR@k, nDCG@k for k ∈ {1, 3, 5, 10} | `indexing/eval_retrieval_pg.py` |
+| End-to-end evaluation | W1, W2 | Source hit rate + fact coverage via live `/query` endpoint | `indexing/eval_agent.py` |
+| Frontend (W10) | W10 | Gradio web UI with reasoning mode toggle, stop button, agent step traces, sourced citations, clickable doc viewer with BM25-term highlighting, and query history | `frontend/app.py` |
 | Re-ranking | W9 | *Not yet implemented* — next step (cross-encoder) | — |
 
 ---
@@ -842,10 +861,7 @@ repo:
 ```
 .
 ├── README.md                  this file
-├── package.json               TS deps: pi-agent-core, pi-tui, better-sqlite3
-├── package-lock.json
-├── tsconfig.json
-├── Modelfile                  Ollama Modelfile — qwen3:8b with 32k context
+├── README_Nuvolos.md          Nuvolos platform guide (apps, networking, storage)
 │
 ├── backend/                   Python — Nuvolos FastAPI backend
 │   ├── main.py                FastAPI entry point (lifespan, app, endpoints)
@@ -870,41 +886,33 @@ repo:
 │   │   ├── questions_test.parquet     (556 KB, committed)
 │   │   ├── subset_manifest.json       (68 KB, committed)
 │   │   └── documents_test.parquet     (1.4 GB, gitignored)
-│   ├── .venv/                          (gitignored)
-│   └── index/
-│       └── rag.db                      (337 MB, gitignored — local only)
+│   └── .venv/                          (gitignored)
 │
-├── indexing/                  Python — one-shot, resumable (shared by both targets)
-│   ├── schema.sql             SQLite schema (local): documents | chunks | FTS5 | meta
-│   ├── schema_pg.sql          pgvector schema (Nuvolos): rag_documents | rag_chunks | rag_meta
-│   ├── chunkers.py            per-source: gmail / slack / document-like
-│   ├── embed.py               Ollama embedding client, retry + payload shrink (shared: local + Nuvolos)
-│   ├── build_index.py         local indexer: Parquet → SQLite (commits every 200 chunks)
-│   ├── build_index_pg.py      Nuvolos indexer: Parquet → pgvector (nomic-embed-text via Ollama)
-│   ├── rechunk_source.py      re-do one source_type after a chunker change (local)
-│   ├── rechunk_source_pg.py   re-do one source_type after a chunker change (Nuvolos)
-│   ├── eval_retrieval.py      Recall@k / MRR@k / nDCG@k against the gold set (local)
-│   └── eval_retrieval_pg.py   Recall@k / MRR@k / nDCG@k against the gold set (Nuvolos)
+├── indexing/                  Python — Nuvolos indexing and evaluation
+│   ├── schema_pg.sql          pgvector schema: rag_documents | rag_chunks | rag_meta
+│   ├── chunkers.py            per-source chunkers: gmail / slack / document-like
+│   ├── embed.py               Ollama embedding client with retry + payload shrink
+│   ├── build_index_pg.py      one-time indexer: Parquet → pgvector (resumable)
+│   ├── rechunk_source_pg.py   re-index one source_type after a chunker change
+│   ├── eval_retrieval_pg.py   Level 1 eval: Recall@k / MRR@k / nDCG@k (retrieval only)
+│   └── eval_agent.py          Level 2 eval: source hit rate + fact coverage via /query
 │
-└── src/                       TypeScript — local agent (TUI, unchanged)
-    ├── main.ts                pi-agent-core entrypoint + TUI
-    ├── prompt.ts              system prompt (workflow, ≤3 searches/q, citation format)
-    ├── model.ts               Ollama LLM config (Qwen 3 8B, openai-completions)
-    ├── permissions.ts         interactive tool-call gating (read/write/edit/bash)
-    ├── rag/
-    │   ├── db.ts              better-sqlite3 read-only + Float32Array vectors
-    │   ├── embed.ts           Ollama /api/embeddings client (L2-normalized)
-    │   ├── fusion.ts          hybrid search: BM25 + vector + weighted fusion
-    │   ├── smoke.ts           one-shot CLI search for development
-    │   └── filter_smoke.ts    sanity tests for the structured filters
-    └── tools/
-        ├── index.ts           tool exports
-        ├── search.ts          → src/rag/fusion.ts
-        ├── open_document.ts   → src/rag/db.ts (fetchDocument)
-        ├── read.ts            local FS — read
-        ├── write.ts           local FS — write
-        ├── edit.ts            local FS — edit
-        └── bash.ts            local FS — bash
+└── typescript_deprecated/     Legacy TypeScript TUI + SQLite indexing (local only)
+    ├── Modelfile              Ollama Modelfile for qwen3-8b-32k (local TUI)
+    ├── package.json           Node deps: pi-agent-core, pi-tui, better-sqlite3
+    ├── tsconfig.json
+    ├── src/                   TypeScript agent source
+    │   ├── main.ts            pi-agent-core entrypoint + TUI
+    │   ├── prompt.ts          system prompt
+    │   ├── model.ts           Ollama LLM config
+    │   ├── permissions.ts     interactive tool-call gating
+    │   ├── rag/               SQLite-based retrieval
+    │   └── tools/             tool implementations
+    └── indexing/              SQLite-only indexing scripts
+        ├── schema.sql         SQLite schema
+        ├── build_index.py     Parquet → SQLite indexer
+        ├── rechunk_source.py  re-index one source (SQLite)
+        └── eval_retrieval.py  Recall@k / MRR@k / nDCG@k (SQLite)
 ```
 
 ---
