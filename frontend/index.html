@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Company RAG Agent</title>
+<style>
+  :root {
+    --bg:        #0f1117;
+    --surface:   #1a1d27;
+    --surface2:  #22263a;
+    --border:    #2e3250;
+    --accent:    #4f8ef7;
+    --accent2:   #7c5cbf;
+    --text:      #e2e8f0;
+    --subtext:   #8892a4;
+    --green:     #4ade80;
+    --yellow:    #facc15;
+    --red:       #f87171;
+    --hl:        rgba(250,200,0,0.25);
+    --user-bg:   #1e3a5f;
+    --asst-bg:   #1a1d27;
+    --radius:    8px;
+    --font:      system-ui, -apple-system, sans-serif;
+    --mono:      'JetBrains Mono', 'Fira Code', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* ── Header ── */
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  header h1 { font-size: 16px; font-weight: 600; color: var(--accent); }
+  header span { font-size: 12px; color: var(--subtext); margin-left: auto; }
+
+  /* ── Layout ── */
+  .layout { display: grid; grid-template-columns: 1fr 380px; flex: 1; overflow: hidden; gap: 0; }
+
+  /* ── Left panel ── */
+  .left { display: flex; flex-direction: column; border-right: 1px solid var(--border); overflow: hidden; }
+
+  /* Conversation */
+  #conversation { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { display: flex; flex-direction: column; max-width: 90%; }
+  .msg.user  { align-self: flex-end; align-items: flex-end; }
+  .msg.asst  { align-self: flex-start; align-items: flex-start; }
+  .msg-role { font-size: 11px; color: var(--subtext); margin-bottom: 3px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+  .msg-body { padding: 10px 14px; border-radius: var(--radius); line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .msg.user  .msg-body { background: var(--user-bg); border-bottom-right-radius: 2px; }
+  .msg.asst  .msg-body { background: var(--asst-bg); border: 1px solid var(--border); border-bottom-left-radius: 2px; }
+  .msg-body a { color: var(--accent); }
+  .msg-body code { font-family: var(--mono); background: rgba(255,255,255,0.06); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+
+  .tool-event { font-size: 12px; color: var(--subtext); padding: 4px 12px; font-style: italic; display: flex; align-items: center; gap: 6px; }
+  .tool-event::before { content: "⚙"; font-style: normal; }
+
+  .thinking-block { margin-top: 6px; padding: 8px 12px; background: rgba(124,92,191,0.12); border-left: 3px solid var(--accent2); border-radius: 4px; font-size: 12px; color: var(--subtext); white-space: pre-wrap; max-height: 120px; overflow-y: auto; }
+  .thinking-label { font-size: 10px; color: var(--accent2); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+
+  /* Input area */
+  .input-area { padding: 12px 16px; background: var(--surface); border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
+  .input-row  { display: flex; gap: 8px; }
+  textarea { flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 10px 12px; font-size: 14px; font-family: var(--font); resize: none; height: 72px; outline: none; transition: border-color .15s; }
+  textarea:focus { border-color: var(--accent); }
+  .btn { padding: 8px 18px; border: none; border-radius: var(--radius); font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity .15s; white-space: nowrap; }
+  .btn:disabled { opacity: 0.4; cursor: default; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-stop    { background: var(--red);   color: #fff; }
+  .opts-row { display: flex; gap: 16px; align-items: center; }
+  label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--subtext); cursor: pointer; user-select: none; }
+  input[type=checkbox] { accent-color: var(--accent); width: 14px; height: 14px; }
+
+  /* ── Right panel ── */
+  .right { display: flex; flex-direction: column; overflow: hidden; }
+  .panel { flex: 1; overflow-y: auto; }
+  .panel-header { padding: 10px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--subtext); border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+
+  /* Sources */
+  .sources-panel { flex: 0 0 auto; max-height: 45%; display: flex; flex-direction: column; border-bottom: 1px solid var(--border); }
+  #sources-list { overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .source-card { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; cursor: pointer; transition: border-color .15s; }
+  .source-card:hover { border-color: var(--accent); }
+  .source-card.opened { border-color: var(--accent2); }
+  .sc-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; gap: 8px; }
+  .sc-title { font-size: 12px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .sc-score { font-size: 11px; color: var(--green); font-weight: 600; white-space: nowrap; }
+  .sc-source { font-size: 10px; color: var(--subtext); margin-bottom: 4px; }
+  .score-bar { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; margin-bottom: 5px; }
+  .score-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--green)); border-radius: 2px; }
+  .sc-preview { font-size: 11px; color: var(--subtext); line-height: 1.5; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+  /* Document viewer */
+  .doc-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  #doc-viewer { padding: 14px; overflow-y: auto; flex: 1; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+  #doc-viewer .hl { background: var(--hl); border-radius: 2px; padding: 0 1px; }
+  #doc-meta { padding: 8px 14px; font-size: 11px; color: var(--subtext); border-top: 1px solid var(--border); background: var(--surface); flex-shrink: 0; display: none; }
+
+  /* History */
+  .history-bar { padding: 6px 12px; font-size: 11px; color: var(--subtext); border-top: 1px solid var(--border); background: var(--surface); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; flex-shrink: 0; }
+  .hist-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 2px 10px; font-size: 11px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
+  .hist-chip:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .empty-state { text-align: center; padding: 40px 20px; color: var(--subtext); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🔍 Company RAG Agent</h1>
+  <span id="status-text">Ready</span>
+</header>
+
+<div class="layout">
+  <!-- Left: Conversation -->
+  <div class="left">
+    <div id="conversation">
+      <div class="empty-state">Ask a question about your company knowledge base.</div>
+    </div>
+
+    <div class="input-area">
+      <div class="input-row">
+        <textarea id="msg-input" placeholder="Ask anything…" rows="3"></textarea>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <button class="btn btn-primary" id="submit-btn" onclick="submit()">Send</button>
+          <button class="btn btn-stop"    id="stop-btn"   onclick="stop()" disabled>Stop</button>
+        </div>
+      </div>
+      <div class="opts-row">
+        <label><input type="checkbox" id="show-sources" checked> Show sources</label>
+        <label><input type="checkbox" id="enable-thinking"> Model reasoning</label>
+      </div>
+    </div>
+
+    <div class="history-bar" id="history-bar" style="display:none">
+      <span style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;">History:</span>
+    </div>
+  </div>
+
+  <!-- Right: Sources + Document viewer -->
+  <div class="right">
+    <div class="sources-panel">
+      <div class="panel-header">Sources</div>
+      <div id="sources-list">
+        <div class="empty-state" style="padding:20px">No sources yet.</div>
+      </div>
+    </div>
+
+    <div class="doc-panel">
+      <div class="panel-header">Document viewer</div>
+      <div id="doc-viewer"><div class="empty-state">Click a source card to open the full document.</div></div>
+      <div id="doc-meta"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ── State ──────────────────────────────────────────────────────────────────
+  let history    = [];
+  let queryLog   = [];
+  let controller = null;
+  let currentQuery = '';
+
+  const conv     = document.getElementById('conversation');
+  const input    = document.getElementById('msg-input');
+  const submitBtn = document.getElementById('submit-btn');
+  const stopBtn   = document.getElementById('stop-btn');
+  const srcList   = document.getElementById('sources-list');
+  const docViewer = document.getElementById('doc-viewer');
+  const docMeta   = document.getElementById('doc-meta');
+  const histBar   = document.getElementById('history-bar');
+  const statusEl  = document.getElementById('status-text');
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function setStatus(text, color) {
+    statusEl.textContent = text;
+    statusEl.style.color = color || '';
+  }
+
+  function scrollConv() {
+    conv.scrollTop = conv.scrollHeight;
+  }
+
+  function addMessage(role, content, id) {
+    const div = document.createElement('div');
+    div.className = `msg ${role}`;
+    if (id) div.id = id;
+    div.innerHTML = `<div class="msg-role">${role === 'user' ? 'You' : 'Assistant'}</div>
+                     <div class="msg-body"></div>`;
+    setMsgContent(div.querySelector('.msg-body'), content);
+    conv.appendChild(div);
+    scrollConv();
+    return div;
+  }
+
+  const DOC_RE = /\bdsid_[a-f0-9]+\b/g;
+
+  function setMsgContent(el, text) {
+    // Replace doc IDs with clickable links
+    const escaped = text
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(DOC_RE, id => `<a href="#" onclick="openDocById('${id}','');return false;"><code>${id}</code></a>`);
+    el.innerHTML = escaped;
+  }
+
+  function addToolEvent(text) {
+    const div = document.createElement('div');
+    div.className = 'tool-event';
+    div.textContent = text;
+    conv.appendChild(div);
+    scrollConv();
+    return div;
+  }
+
+  function updateLastAsstMsg(text) {
+    const msgs = conv.querySelectorAll('.msg.asst');
+    if (!msgs.length) return;
+    setMsgContent(msgs[msgs.length-1].querySelector('.msg-body'), text);
+    scrollConv();
+  }
+
+  function addThinkingBlock(text) {
+    const msgs = conv.querySelectorAll('.msg.asst');
+    if (!msgs.length) return;
+    const last = msgs[msgs.length-1];
+    const block = document.createElement('div');
+    block.className = 'thinking-block';
+    block.innerHTML = `<div class="thinking-label">Model reasoning</div>${escHtml(text)}`;
+    last.appendChild(block);
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // ── Submit ─────────────────────────────────────────────────────────────────
+  async function submit() {
+    const q = input.value.trim();
+    if (!q || submitBtn.disabled) return;
+    input.value = '';
+    currentQuery = q;
+
+    // Remove empty state
+    const empty = conv.querySelector('.empty-state');
+    if (empty) empty.remove();
+
+    addMessage('user', q);
+    const asstMsg = addMessage('asst', '⏳ Searching…');
+    const asstBody = asstMsg.querySelector('.msg-body');
+
+    submitBtn.disabled = true;
+    stopBtn.disabled   = false;
+    setStatus('Working…', 'var(--yellow)');
+
+    // Clear sources panel
+    srcList.innerHTML = '<div class="empty-state" style="padding:20px">Fetching…</div>';
+
+    controller = new AbortController();
+
+    try {
+      const res = await fetch('/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: q,
+          history,
+          thinking_mode: document.getElementById('enable-thinking').checked,
+        }),
+        signal: controller.signal,
+      });
+
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let toolEventEl = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          let event;
+          try { event = JSON.parse(line.slice(6)); } catch { continue; }
+
+          switch (event.type) {
+            case 'tool_start': {
+              const label = event.name === 'search' ? `🔍 Searching: "${(event.args?.query||'').slice(0,50)}"…`
+                          : event.name === 'open_document' ? `📄 Opening ${event.args?.doc_id}…`
+                          : event.name === 'add_document'  ? `✏️ Writing document…`
+                          : event.name === 'edit_document' ? `✏️ Editing ${event.args?.doc_id}…`
+                          : `⚙ ${event.name}…`;
+              toolEventEl = addToolEvent(label);
+              setMsgContent(asstBody, '⏳ Working…');
+              break;
+            }
+            case 'tool_end':
+              if (toolEventEl) { toolEventEl.remove(); toolEventEl = null; }
+              break;
+
+            case 'thinking':
+              addThinkingBlock(event.content);
+              break;
+
+            case 'done': {
+              setMsgContent(asstBody, event.answer || '(no answer)');
+              if (event.sources?.length && document.getElementById('show-sources').checked) {
+                renderSources(event.sources, q);
+              } else {
+                srcList.innerHTML = '<div class="empty-state" style="padding:20px">No sources.</div>';
+              }
+              history.push({ role: 'user', content: q });
+              history.push({ role: 'assistant', content: event.answer || '' });
+              addToHistory(q);
+              setStatus(`Done — ${Math.round(event.latency_ms / 1000)}s`, 'var(--green)');
+              break;
+            }
+
+            case 'error':
+              setMsgContent(asstBody, `Error: ${event.message}`);
+              setStatus('Error', 'var(--red)');
+              break;
+          }
+        }
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        setMsgContent(asstBody, 'Search interrupted by user.');
+        setStatus('Interrupted', 'var(--subtext)');
+      } else {
+        setMsgContent(asstBody, `Error: ${e.message}`);
+        setStatus('Error', 'var(--red)');
+      }
+    }
+
+    submitBtn.disabled = false;
+    stopBtn.disabled   = true;
+    controller = null;
+  }
+
+  function stop() {
+    if (controller) { controller.abort(); controller = null; }
+    stopBtn.disabled = true;
+  }
+
+  // ── Sources rendering ──────────────────────────────────────────────────────
+  function renderSources(sources, query) {
+    srcList.innerHTML = '';
+    const maxScore = Math.max(...sources.map(s => s.score), 0.01);
+    for (const s of sources) {
+      const card = document.createElement('div');
+      card.className = 'source-card' + (s.opened ? ' opened' : '');
+      const pct = Math.round((s.score / maxScore) * 100);
+      card.innerHTML = `
+        <div class="sc-head">
+          <div class="sc-title">${escHtml(s.title || s.doc_id)}</div>
+          <div class="sc-score">${s.score.toFixed(3)}</div>
+        </div>
+        <div class="sc-source">${escHtml(s.source_type)}${s.opened ? ' · opened' : ''}</div>
+        <div class="score-bar"><div class="score-fill" style="width:${pct}%"></div></div>
+        <div class="sc-preview">${escHtml(s.preview)}</div>`;
+      card.addEventListener('click', () => openDocById(s.doc_id, query));
+      srcList.appendChild(card);
+    }
+  }
+
+  // ── Document viewer ────────────────────────────────────────────────────────
+  async function openDocById(docId, query) {
+    docViewer.textContent = 'Loading…';
+    docMeta.style.display = 'none';
+    try {
+      const q = query || currentQuery;
+      const res  = await fetch(`/doc/${docId}`);
+      if (!res.ok) { docViewer.textContent = 'Not found.'; return; }
+      const doc  = await res.json();
+      docMeta.style.display = 'block';
+      docMeta.textContent   = `${doc.source_type}  ·  ${doc.doc_id}  ·  ${doc.title || 'untitled'}`;
+      renderDoc(doc.content, q);
+    } catch (e) {
+      docViewer.textContent = `Error: ${e.message}`;
+    }
+  }
+
+  function renderDoc(content, query) {
+    // TF-based highlighting: score query terms by frequency in document
+    const queryTerms = (query.toLowerCase().match(/[a-zA-Z]\w*/g) || []).filter(w => w.length > 3);
+    const docWords   = (content.toLowerCase().match(/[a-zA-Z]\w*/g) || []);
+    const docLen     = docWords.length || 1;
+    const tf         = {};
+    for (const w of docWords) tf[w] = (tf[w] || 0) + 1;
+    const scored = queryTerms
+      .map(t => ({ t, s: (tf[t] || 0) / docLen }))
+      .filter(x => x.s > 0)
+      .sort((a, b) => b.s - a.s)
+      .slice(0, 12)
+      .map(x => x.t);
+
+    if (!scored.length) {
+      docViewer.textContent = content;
+      return;
+    }
+
+    // Highlight matches
+    const pattern = new RegExp(`\\b(${scored.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'gi');
+    const escaped = content.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    docViewer.innerHTML = escaped.replace(pattern, '<span class="hl">$1</span>');
+    docViewer.scrollTop = 0;
+  }
+
+  // ── Query history ──────────────────────────────────────────────────────────
+  function addToHistory(q) {
+    queryLog.unshift(q);
+    if (queryLog.length > 10) queryLog.pop();
+    renderHistory();
+  }
+
+  function renderHistory() {
+    histBar.style.display = queryLog.length ? 'flex' : 'none';
+    // Keep the label, rebuild chips
+    const existing = histBar.querySelectorAll('.hist-chip');
+    existing.forEach(e => e.remove());
+    for (const q of queryLog) {
+      const chip = document.createElement('div');
+      chip.className  = 'hist-chip';
+      chip.title      = q;
+      chip.textContent = q.slice(0, 28) + (q.length > 28 ? '…' : '');
+      chip.onclick = () => { input.value = q; input.focus(); };
+      histBar.appendChild(chip);
+    }
+  }
+
+  // ── Keyboard ───────────────────────────────────────────────────────────────
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+  });
+</script>
+</body>
+</html>
