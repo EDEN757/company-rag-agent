@@ -28,12 +28,13 @@
   body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 
   /* ── Header ── */
-  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
-  header h1 { font-size: 16px; font-weight: 600; color: var(--accent); }
-  header span { font-size: 12px; color: var(--subtext); margin-left: auto; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  header h1 { font-size: 15px; font-weight: 600; color: var(--accent); }
+  #status-text { font-size: 12px; margin-left: auto; }
+  #timer-text  { font-size: 12px; color: var(--yellow); font-variant-numeric: tabular-nums; min-width: 48px; text-align: right; display: none; }
 
   /* ── Layout ── */
-  .layout { display: grid; grid-template-columns: 1fr 380px; flex: 1; overflow: hidden; gap: 0; }
+  .layout { display: grid; grid-template-columns: 1fr 380px; flex: 1; overflow: hidden; }
 
   /* ── Left panel ── */
   .left { display: flex; flex-direction: column; border-right: 1px solid var(--border); overflow: hidden; }
@@ -50,16 +51,15 @@
   .msg-body a { color: var(--accent); }
   .msg-body code { font-family: var(--mono); background: rgba(255,255,255,0.06); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
 
-  .tool-event { font-size: 12px; color: var(--subtext); padding: 4px 12px; font-style: italic; display: flex; align-items: center; gap: 6px; }
-  .tool-event::before { content: "⚙"; font-style: normal; }
+  .tool-event { font-size: 12px; color: var(--subtext); padding: 3px 12px; font-style: italic; display: flex; align-items: center; gap: 6px; }
 
   .thinking-block { margin-top: 6px; padding: 8px 12px; background: rgba(124,92,191,0.12); border-left: 3px solid var(--accent2); border-radius: 4px; font-size: 12px; color: var(--subtext); white-space: pre-wrap; max-height: 120px; overflow-y: auto; }
   .thinking-label { font-size: 10px; color: var(--accent2); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
 
   /* Input area */
-  .input-area { padding: 12px 16px; background: var(--surface); border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
+  .input-area { padding: 10px 16px; background: var(--surface); border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
   .input-row  { display: flex; gap: 8px; }
-  textarea { flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 10px 12px; font-size: 14px; font-family: var(--font); resize: none; height: 72px; outline: none; transition: border-color .15s; }
+  textarea { flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 10px 12px; font-size: 14px; font-family: var(--font); resize: none; height: 68px; outline: none; transition: border-color .15s; }
   textarea:focus { border-color: var(--accent); }
   .btn { padding: 8px 18px; border: none; border-radius: var(--radius); font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity .15s; white-space: nowrap; }
   .btn:disabled { opacity: 0.4; cursor: default; }
@@ -71,17 +71,23 @@
 
   /* ── Right panel ── */
   .right { display: flex; flex-direction: column; overflow: hidden; }
-  .panel { flex: 1; overflow-y: auto; }
-  .panel-header { padding: 10px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--subtext); border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+  .panel-header { padding: 8px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--subtext); border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; }
+
+  /* Stats */
+  .stats-panel { flex-shrink: 0; border-bottom: 1px solid var(--border); }
+  #stats-grid { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px; }
+  .stat-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 3px 10px; font-size: 11px; color: var(--subtext); white-space: nowrap; }
+  .stat-chip span { color: var(--accent); font-weight: 600; }
+  #total-chip { color: var(--green); font-size: 11px; padding: 8px 14px 4px; }
 
   /* Sources */
-  .sources-panel { flex: 0 0 auto; max-height: 45%; display: flex; flex-direction: column; border-bottom: 1px solid var(--border); }
+  .sources-panel { flex: 0 0 auto; max-height: 38%; display: flex; flex-direction: column; border-bottom: 1px solid var(--border); }
   #sources-list { overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
   .source-card { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; cursor: pointer; transition: border-color .15s; }
   .source-card:hover { border-color: var(--accent); }
   .source-card.opened { border-color: var(--accent2); }
   .sc-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; gap: 8px; }
-  .sc-title { font-size: 12px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .sc-title { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
   .sc-score { font-size: 11px; color: var(--green); font-weight: 600; white-space: nowrap; }
   .sc-source { font-size: 10px; color: var(--subtext); margin-bottom: 4px; }
   .score-bar { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; margin-bottom: 5px; }
@@ -90,43 +96,71 @@
 
   /* Document viewer */
   .doc-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-  #doc-viewer { padding: 14px; overflow-y: auto; flex: 1; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+  #doc-viewer { padding: 14px; overflow-y: auto; flex: 1; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
   #doc-viewer .hl { background: var(--hl); border-radius: 2px; padding: 0 1px; }
-  #doc-meta { padding: 8px 14px; font-size: 11px; color: var(--subtext); border-top: 1px solid var(--border); background: var(--surface); flex-shrink: 0; display: none; }
+  #doc-meta { padding: 6px 14px; font-size: 11px; color: var(--subtext); border-top: 1px solid var(--border); background: var(--surface); flex-shrink: 0; display: none; }
 
   /* History */
-  .history-bar { padding: 6px 12px; font-size: 11px; color: var(--subtext); border-top: 1px solid var(--border); background: var(--surface); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; flex-shrink: 0; }
+  .history-bar { padding: 5px 12px; font-size: 11px; color: var(--subtext); border-top: 1px solid var(--border); background: var(--surface); display: flex; gap: 6px; flex-wrap: wrap; align-items: center; flex-shrink: 0; }
   .hist-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 2px 10px; font-size: 11px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
   .hist-chip:hover { border-color: var(--accent); color: var(--accent); }
 
-  /* Scrollbar */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
-  .empty-state { text-align: center; padding: 40px 20px; color: var(--subtext); font-size: 13px; }
+  .empty-state { text-align: center; padding: 24px 16px; color: var(--subtext); font-size: 12px; }
+
+  /* Example queries */
+  .examples-wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 32px 24px; }
+  .examples-wrap p { font-size: 13px; color: var(--subtext); }
+  .example-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+  .example-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 14px; padding: 6px 14px; font-size: 12px; color: var(--text); cursor: pointer; transition: border-color .15s, color .15s; }
+  .example-chip:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Clear button */
+  .btn-clear { background: transparent; color: var(--subtext); border: 1px solid var(--border); padding: 5px 12px; font-size: 12px; }
+  .btn-clear:hover { border-color: var(--red); color: var(--red); }
+
+  /* Open-in-window button on source cards */
+  .sc-ext { font-size: 11px; color: var(--subtext); cursor: pointer; padding: 2px 4px; border-radius: 3px; flex-shrink: 0; }
+  .sc-ext:hover { color: var(--accent); }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  .pulsing { animation: pulse 1.5s infinite; }
 </style>
 </head>
 <body>
 
 <header>
   <h1>🔍 Company RAG Agent</h1>
-  <span id="status-text">Ready</span>
+  <span id="status-text" style="color:var(--green)">Ready</span>
+  <span id="timer-text"></span>
+  <button class="btn btn-clear" id="clear-btn" onclick="clearChat()">Clear chat</button>
 </header>
 
 <div class="layout">
   <!-- Left: Conversation -->
   <div class="left">
     <div id="conversation">
-      <div class="empty-state">Ask a question about your company knowledge base.</div>
+      <div class="examples-wrap" id="examples-wrap">
+        <p>Ask anything about your company knowledge base. Try an example:</p>
+        <div class="example-chips">
+          <div class="example-chip" onclick="useExample(this)">What were the main topics in recent team meetings?</div>
+          <div class="example-chip" onclick="useExample(this)">Find emails about project deadlines or deliverables</div>
+          <div class="example-chip" onclick="useExample(this)">What Slack messages mention the product launch?</div>
+          <div class="example-chip" onclick="useExample(this)">Summarize the open issues or tasks we have</div>
+          <div class="example-chip" onclick="useExample(this)">What do our documents say about onboarding?</div>
+        </div>
+      </div>
     </div>
 
     <div class="input-area">
       <div class="input-row">
-        <textarea id="msg-input" placeholder="Ask anything…" rows="3"></textarea>
+        <textarea id="msg-input" placeholder="Ask anything… (Enter to send, Shift+Enter for newline)" rows="3"></textarea>
         <div style="display:flex;flex-direction:column;gap:6px;">
-          <button class="btn btn-primary" id="submit-btn" onclick="submit()">Send</button>
-          <button class="btn btn-stop"    id="stop-btn"   onclick="stop()" disabled>Stop</button>
+          <button class="btn btn-primary" id="submit-btn" onclick="submitQuery()">Send</button>
+          <button class="btn btn-stop"    id="stop-btn"   onclick="stopQuery()" disabled>Stop</button>
         </div>
       </div>
       <div class="opts-row">
@@ -136,16 +170,24 @@
     </div>
 
     <div class="history-bar" id="history-bar" style="display:none">
-      <span style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;">History:</span>
+      <span style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;flex-shrink:0">History:</span>
     </div>
   </div>
 
-  <!-- Right: Sources + Document viewer -->
+  <!-- Right: Stats + Sources + Document viewer -->
   <div class="right">
+    <div class="stats-panel">
+      <div class="panel-header">
+        Knowledge base
+        <span id="total-chip" style="font-size:11px;color:var(--green);font-weight:600"></span>
+      </div>
+      <div id="stats-grid"><div class="empty-state" style="padding:10px">Loading…</div></div>
+    </div>
+
     <div class="sources-panel">
       <div class="panel-header">Sources</div>
       <div id="sources-list">
-        <div class="empty-state" style="padding:20px">No sources yet.</div>
+        <div class="empty-state">No sources yet.</div>
       </div>
     </div>
 
@@ -159,13 +201,15 @@
 
 <script>
   // ── State ──────────────────────────────────────────────────────────────────
-  let history    = [];
-  let queryLog   = [];
-  let controller = null;
+  let history      = [];
+  let queryLog     = [];
+  let controller   = null;
+  let timerInterval = null;
+  let startTime    = 0;
   let currentQuery = '';
 
-  const conv     = document.getElementById('conversation');
-  const input    = document.getElementById('msg-input');
+  const conv      = document.getElementById('conversation');
+  const input     = document.getElementById('msg-input');
   const submitBtn = document.getElementById('submit-btn');
   const stopBtn   = document.getElementById('stop-btn');
   const srcList   = document.getElementById('sources-list');
@@ -173,21 +217,43 @@
   const docMeta   = document.getElementById('doc-meta');
   const histBar   = document.getElementById('history-bar');
   const statusEl  = document.getElementById('status-text');
+  const timerEl   = document.getElementById('timer-text');
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   function setStatus(text, color) {
     statusEl.textContent = text;
-    statusEl.style.color = color || '';
+    statusEl.style.color = color || 'var(--text)';
   }
 
-  function scrollConv() {
-    conv.scrollTop = conv.scrollHeight;
+  function startTimer() {
+    startTime = Date.now();
+    timerEl.style.display = 'block';
+    timerInterval = setInterval(() => {
+      const s = Math.round((Date.now() - startTime) / 1000);
+      timerEl.textContent = `${s}s`;
+    }, 500);
   }
 
-  function addMessage(role, content, id) {
+  function stopTimer() {
+    clearInterval(timerInterval);
+    timerInterval = null;
+    timerEl.style.display = 'none';
+  }
+
+  function scrollConv() { conv.scrollTop = conv.scrollHeight; }
+
+  const DOC_RE = /\bdsid_[a-f0-9]+\b/g;
+
+  function setMsgContent(el, text) {
+    const escaped = text
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(DOC_RE, id => `<a href="#" onclick="openDocInNewWindow('${id}');return false;" title="Open document in new window"><code>${id}</code></a>`);
+    el.innerHTML = escaped;
+  }
+
+  function addMessage(role, content) {
     const div = document.createElement('div');
     div.className = `msg ${role}`;
-    if (id) div.id = id;
     div.innerHTML = `<div class="msg-role">${role === 'user' ? 'You' : 'Assistant'}</div>
                      <div class="msg-body"></div>`;
     setMsgContent(div.querySelector('.msg-body'), content);
@@ -196,19 +262,9 @@
     return div;
   }
 
-  const DOC_RE = /\bdsid_[a-f0-9]+\b/g;
-
-  function setMsgContent(el, text) {
-    // Replace doc IDs with clickable links
-    const escaped = text
-      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-      .replace(DOC_RE, id => `<a href="#" onclick="openDocById('${id}','');return false;"><code>${id}</code></a>`);
-    el.innerHTML = escaped;
-  }
-
   function addToolEvent(text) {
     const div = document.createElement('div');
-    div.className = 'tool-event';
+    div.className = 'tool-event pulsing';
     div.textContent = text;
     conv.appendChild(div);
     scrollConv();
@@ -225,11 +281,10 @@
   function addThinkingBlock(text) {
     const msgs = conv.querySelectorAll('.msg.asst');
     if (!msgs.length) return;
-    const last = msgs[msgs.length-1];
     const block = document.createElement('div');
     block.className = 'thinking-block';
     block.innerHTML = `<div class="thinking-label">Model reasoning</div>${escHtml(text)}`;
-    last.appendChild(block);
+    msgs[msgs.length-1].appendChild(block);
   }
 
   function escHtml(s) {
@@ -237,28 +292,28 @@
   }
 
   // ── Submit ─────────────────────────────────────────────────────────────────
-  async function submit() {
+  async function submitQuery() {
     const q = input.value.trim();
     if (!q || submitBtn.disabled) return;
     input.value = '';
     currentQuery = q;
 
-    // Remove empty state
-    const empty = conv.querySelector('.empty-state');
-    if (empty) empty.remove();
+    const exWrap = document.getElementById('examples-wrap');
+    if (exWrap) exWrap.remove();
 
     addMessage('user', q);
-    const asstMsg = addMessage('asst', '⏳ Searching…');
+    const asstMsg  = addMessage('asst', '🤔 Waiting for model…');
     const asstBody = asstMsg.querySelector('.msg-body');
 
     submitBtn.disabled = true;
     stopBtn.disabled   = false;
+    stopBtn.textContent = 'Stop';
+    srcList.innerHTML  = '<div class="empty-state">Searching…</div>';
     setStatus('Working…', 'var(--yellow)');
-
-    // Clear sources panel
-    srcList.innerHTML = '<div class="empty-state" style="padding:20px">Fetching…</div>';
+    startTimer();
 
     controller = new AbortController();
+    let toolEventEl = null;
 
     try {
       const res = await fetch('/query', {
@@ -275,7 +330,6 @@
       const reader  = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = '';
-      let toolEventEl = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -290,18 +344,31 @@
           try { event = JSON.parse(line.slice(6)); } catch { continue; }
 
           switch (event.type) {
+
+            case 'waiting':
+              setMsgContent(asstBody, '🤔 Waiting for model response…');
+              setStatus(`Working… turn ${event.turn + 1}`, 'var(--yellow)');
+              break;
+
+            case 'ping':
+              // keep-alive — no-op, timer handles elapsed display
+              break;
+
             case 'tool_start': {
-              const label = event.name === 'search' ? `🔍 Searching: "${(event.args?.query||'').slice(0,50)}"…`
-                          : event.name === 'open_document' ? `📄 Opening ${event.args?.doc_id}…`
-                          : event.name === 'add_document'  ? `✏️ Writing document…`
-                          : event.name === 'edit_document' ? `✏️ Editing ${event.args?.doc_id}…`
-                          : `⚙ ${event.name}…`;
+              if (toolEventEl) toolEventEl.remove();
+              const label =
+                event.name === 'search'        ? `🔍 Searching: "${(event.args?.query || '').slice(0,50)}"…`
+              : event.name === 'open_document' ? `📄 Opening ${event.args?.doc_id}…`
+              : event.name === 'add_document'  ? `✏️ Writing document…`
+              : event.name === 'edit_document' ? `✏️ Editing ${event.args?.doc_id}…`
+              : `⚙ ${event.name}…`;
               toolEventEl = addToolEvent(label);
-              setMsgContent(asstBody, '⏳ Working…');
+              setMsgContent(asstBody, `⏳ Running ${event.name}…`);
               break;
             }
+
             case 'tool_end':
-              if (toolEventEl) { toolEventEl.remove(); toolEventEl = null; }
+              if (toolEventEl) { toolEventEl.classList.remove('pulsing'); }
               break;
 
             case 'thinking':
@@ -309,16 +376,18 @@
               break;
 
             case 'done': {
+              if (toolEventEl) { toolEventEl.remove(); toolEventEl = null; }
               setMsgContent(asstBody, event.answer || '(no answer)');
               if (event.sources?.length && document.getElementById('show-sources').checked) {
                 renderSources(event.sources, q);
               } else {
-                srcList.innerHTML = '<div class="empty-state" style="padding:20px">No sources.</div>';
+                srcList.innerHTML = '<div class="empty-state">No sources.</div>';
               }
               history.push({ role: 'user', content: q });
               history.push({ role: 'assistant', content: event.answer || '' });
               addToHistory(q);
-              setStatus(`Done — ${Math.round(event.latency_ms / 1000)}s`, 'var(--green)');
+              const elapsed = Math.round((Date.now() - startTime) / 1000);
+              setStatus(`Done — ${elapsed}s`, 'var(--green)');
               break;
             }
 
@@ -331,25 +400,31 @@
       }
     } catch (e) {
       if (e.name === 'AbortError') {
-        setMsgContent(asstBody, 'Search interrupted by user.');
+        updateLastAsstMsg('Search interrupted by user.');
         setStatus('Interrupted', 'var(--subtext)');
       } else {
-        setMsgContent(asstBody, `Error: ${e.message}`);
+        updateLastAsstMsg(`Error: ${e.message}`);
         setStatus('Error', 'var(--red)');
       }
     }
 
-    submitBtn.disabled = false;
-    stopBtn.disabled   = true;
+    stopTimer();
+    submitBtn.disabled  = false;
+    stopBtn.disabled    = true;
+    stopBtn.textContent = 'Stop';
     controller = null;
   }
 
-  function stop() {
-    if (controller) { controller.abort(); controller = null; }
-    stopBtn.disabled = true;
+  function stopQuery() {
+    if (controller) {
+      controller.abort();
+      controller = null;
+    }
+    stopBtn.textContent = 'Stopping…';
+    stopBtn.disabled    = true;
   }
 
-  // ── Sources rendering ──────────────────────────────────────────────────────
+  // ── Sources ────────────────────────────────────────────────────────────────
   function renderSources(sources, query) {
     srcList.innerHTML = '';
     const maxScore = Math.max(...sources.map(s => s.score), 0.01);
@@ -361,6 +436,7 @@
         <div class="sc-head">
           <div class="sc-title">${escHtml(s.title || s.doc_id)}</div>
           <div class="sc-score">${s.score.toFixed(3)}</div>
+          <div class="sc-ext" title="Open in new window" onclick="event.stopPropagation();openDocInNewWindow('${s.doc_id}')">↗</div>
         </div>
         <div class="sc-source">${escHtml(s.source_type)}${s.opened ? ' · opened' : ''}</div>
         <div class="score-bar"><div class="score-fill" style="width:${pct}%"></div></div>
@@ -372,23 +448,21 @@
 
   // ── Document viewer ────────────────────────────────────────────────────────
   async function openDocById(docId, query) {
-    docViewer.textContent = 'Loading…';
+    docViewer.innerHTML = '<div class="empty-state">Loading…</div>';
     docMeta.style.display = 'none';
     try {
-      const q = query || currentQuery;
-      const res  = await fetch(`/doc/${docId}`);
-      if (!res.ok) { docViewer.textContent = 'Not found.'; return; }
-      const doc  = await res.json();
+      const res = await fetch(`/doc/${docId}`);
+      if (!res.ok) { docViewer.innerHTML = '<div class="empty-state">Not found.</div>'; return; }
+      const doc = await res.json();
       docMeta.style.display = 'block';
       docMeta.textContent   = `${doc.source_type}  ·  ${doc.doc_id}  ·  ${doc.title || 'untitled'}`;
-      renderDoc(doc.content, q);
+      renderDoc(doc.content, query || currentQuery);
     } catch (e) {
-      docViewer.textContent = `Error: ${e.message}`;
+      docViewer.innerHTML = `<div class="empty-state">Error: ${e.message}</div>`;
     }
   }
 
   function renderDoc(content, query) {
-    // TF-based highlighting: score query terms by frequency in document
     const queryTerms = (query.toLowerCase().match(/[a-zA-Z]\w*/g) || []).filter(w => w.length > 3);
     const docWords   = (content.toLowerCase().match(/[a-zA-Z]\w*/g) || []);
     const docLen     = docWords.length || 1;
@@ -397,20 +471,101 @@
     const scored = queryTerms
       .map(t => ({ t, s: (tf[t] || 0) / docLen }))
       .filter(x => x.s > 0)
-      .sort((a, b) => b.s - a.s)
-      .slice(0, 12)
-      .map(x => x.t);
+      .sort((a,b) => b.s - a.s).slice(0,12).map(x => x.t);
 
-    if (!scored.length) {
-      docViewer.textContent = content;
-      return;
-    }
-
-    // Highlight matches
-    const pattern = new RegExp(`\\b(${scored.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'gi');
+    if (!scored.length) { docViewer.textContent = content; return; }
+    const pattern = new RegExp(`\\b(${scored.map(t => t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')})\\b`,'gi');
     const escaped = content.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    docViewer.innerHTML = escaped.replace(pattern, '<span class="hl">$1</span>');
+    docViewer.innerHTML = escaped.replace(pattern,'<span class="hl">$1</span>');
     docViewer.scrollTop = 0;
+  }
+
+  // ── Open document in new window ───────────────────────────────────────────
+  async function openDocInNewWindow(docId) {
+    const win = window.open('', '_blank', 'width=920,height=720,scrollbars=yes,resizable=yes');
+    win.document.write('<!DOCTYPE html><html><head><title>Loading…</title><style>' +
+      'body{background:#0f1117;color:#e2e8f0;font-family:system-ui,-apple-system,sans-serif;' +
+      'padding:28px 36px;line-height:1.75;white-space:pre-wrap;word-break:break-word;font-size:14px}' +
+      'h1{color:#4f8ef7;font-size:17px;font-weight:600;margin-bottom:6px;white-space:normal}' +
+      '.meta{color:#8892a4;font-size:11px;margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid #2e3250}' +
+      '.hl{background:rgba(250,200,0,.25);border-radius:2px;padding:0 1px}' +
+      'a{color:#4f8ef7}</style></head><body><p style="color:#8892a4">Loading…</p></body></html>');
+    win.document.close();
+    try {
+      const res = await fetch(`/doc/${docId}`);
+      if (!res.ok) { win.document.body.innerHTML = '<p style="color:#f87171">Document not found.</p>'; return; }
+      const doc = await res.json();
+      const esc = s => (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const queryTerms = (currentQuery.toLowerCase().match(/[a-zA-Z]\w*/g) || []).filter(w => w.length > 3);
+      let body = esc(doc.content || '');
+      if (queryTerms.length) {
+        const pat = new RegExp(`\\b(${queryTerms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')})\\b`, 'gi');
+        body = body.replace(pat, '<span class="hl">$1</span>');
+      }
+      win.document.title = doc.title || docId;
+      win.document.body.innerHTML =
+        `<h1>${esc(doc.title || docId)}</h1>` +
+        `<div class="meta">${esc(doc.source_type)} &nbsp;·&nbsp; <code style="font-size:11px">${esc(doc.doc_id)}</code></div>` +
+        body;
+    } catch (e) {
+      if (win && !win.closed) win.document.body.innerHTML = `<p style="color:#f87171">Error: ${e.message}</p>`;
+    }
+  }
+
+  // ── Clear chat ─────────────────────────────────────────────────────────────
+  function clearChat() {
+    if (controller) { controller.abort(); controller = null; }
+    history      = [];
+    queryLog     = [];
+    currentQuery = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'examples-wrap';
+    wrap.id = 'examples-wrap';
+    wrap.innerHTML = `<p>Ask anything about your company knowledge base. Try an example:</p>
+      <div class="example-chips">
+        <div class="example-chip" onclick="useExample(this)">What were the main topics in recent team meetings?</div>
+        <div class="example-chip" onclick="useExample(this)">Find emails about project deadlines or deliverables</div>
+        <div class="example-chip" onclick="useExample(this)">What Slack messages mention the product launch?</div>
+        <div class="example-chip" onclick="useExample(this)">Summarize the open issues or tasks we have</div>
+        <div class="example-chip" onclick="useExample(this)">What do our documents say about onboarding?</div>
+      </div>`;
+    conv.innerHTML = '';
+    conv.appendChild(wrap);
+    srcList.innerHTML  = '<div class="empty-state">No sources yet.</div>';
+    docViewer.innerHTML = '<div class="empty-state">Click a source card to open the full document.</div>';
+    docMeta.style.display = 'none';
+    histBar.style.display = 'none';
+    stopTimer();
+    submitBtn.disabled  = false;
+    stopBtn.disabled    = true;
+    stopBtn.textContent = 'Stop';
+    setStatus('Ready', 'var(--green)');
+  }
+
+  // ── Example queries ────────────────────────────────────────────────────────
+  function useExample(el) {
+    input.value = el.textContent;
+    input.focus();
+  }
+
+  // ── Stats panel ────────────────────────────────────────────────────────────
+  async function loadStats() {
+    try {
+      const res  = await fetch('/stats');
+      const data = await res.json();
+      const grid = document.getElementById('stats-grid');
+      const totalEl = document.getElementById('total-chip');
+      grid.innerHTML = '';
+      totalEl.textContent = `${data.total_chunks.toLocaleString()} chunks total`;
+      for (const s of data.sources) {
+        const chip = document.createElement('div');
+        chip.className = 'stat-chip';
+        chip.innerHTML = `${escHtml(s.source_type)} <span>${parseInt(s.chunks).toLocaleString()}</span>`;
+        grid.appendChild(chip);
+      }
+    } catch {
+      document.getElementById('stats-grid').innerHTML = '<div class="empty-state" style="padding:8px">Could not load stats.</div>';
+    }
   }
 
   // ── Query history ──────────────────────────────────────────────────────────
@@ -422,14 +577,12 @@
 
   function renderHistory() {
     histBar.style.display = queryLog.length ? 'flex' : 'none';
-    // Keep the label, rebuild chips
-    const existing = histBar.querySelectorAll('.hist-chip');
-    existing.forEach(e => e.remove());
+    histBar.querySelectorAll('.hist-chip').forEach(e => e.remove());
     for (const q of queryLog) {
       const chip = document.createElement('div');
-      chip.className  = 'hist-chip';
-      chip.title      = q;
-      chip.textContent = q.slice(0, 28) + (q.length > 28 ? '…' : '');
+      chip.className   = 'hist-chip';
+      chip.title       = q;
+      chip.textContent = q.slice(0,28) + (q.length > 28 ? '…' : '');
       chip.onclick = () => { input.value = q; input.focus(); };
       histBar.appendChild(chip);
     }
@@ -437,8 +590,11 @@
 
   // ── Keyboard ───────────────────────────────────────────────────────────────
   input.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitQuery(); }
   });
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  loadStats();
 </script>
 </body>
 </html>

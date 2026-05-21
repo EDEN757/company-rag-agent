@@ -400,6 +400,8 @@ async function runAgent(
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     if (signal.aborted) break;
 
+    emit({ type: "waiting", turn });
+
     let resp: Response;
     try {
       resp = await fetch(`${OLLAMA_HOST}/v1/chat/completions`, {
@@ -466,6 +468,24 @@ app.use(express.static(resolve(here, "../frontend")));
 // Health check
 app.get("/health", (_req, res) => res.json({ status: "ok", model: LLM_MODEL }));
 
+// Stats — chunk + doc counts by source type
+app.get("/stats", async (_req, res) => {
+  try {
+    const { rows } = await pool.query<{ source_type: string; docs: string; chunks: string }>(
+      `SELECT source_type,
+              COUNT(DISTINCT doc_id) AS docs,
+              COUNT(*)               AS chunks
+       FROM rag_chunks
+       GROUP BY source_type
+       ORDER BY chunks DESC`,
+    );
+    const total = rows.reduce((s, r) => s + parseInt(r.chunks), 0);
+    res.json({ sources: rows, total_chunks: total });
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
 // Document fetch
 app.get("/doc/:id", async (req, res) => {
   try {
@@ -499,6 +519,11 @@ app.post("/query", async (req, res) => {
   const controller = new AbortController();
   req.on("close", () => controller.abort());
 
+  // Heartbeat every 8s for the entire request — keeps SSE alive during tool execution too
+  const heartbeat = setInterval(() => {
+    if (!controller.signal.aborted) emit({ type: "ping" });
+  }, 8_000);
+
   const t0 = Date.now();
   try {
     const { answer, sources, traces } = await runAgent(
@@ -507,6 +532,8 @@ app.post("/query", async (req, res) => {
     emit({ type: "done", answer, sources, traces, latency_ms: Date.now() - t0 });
   } catch (e) {
     emit({ type: "error", message: (e as Error).message });
+  } finally {
+    clearInterval(heartbeat);
   }
   res.end();
 });

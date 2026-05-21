@@ -18,9 +18,9 @@ the open-source models locally.
 ## Table of contents
 
 1. [What this is](#what-this-is)
-2. [Quick start — local](#quick-start--local)
-3. [Running on Nuvolos — Python stack](#running-on-nuvolos)
-4. [Running TypeScript agent on Nuvolos](#running-typescript-agent-on-nuvolos)
+2. [Running TypeScript agent on Nuvolos](#running-typescript-agent-on-nuvolos) ← **start here for Nuvolos**
+3. [Quick start — local](#quick-start--local)
+4. [Running on Nuvolos — Python stack (older)](#running-on-nuvolos)
 5. [System design](#system-design)
 6. [Retrieval pipeline](#retrieval-pipeline)
 7. [Chunking strategy](#chunking-strategy)
@@ -63,6 +63,12 @@ Optionally, the `search` tool accepts structured pre-filters
 narrow down by who, when, or where before either retrieval branch runs.
 This is what makes emails and chats searchable by sender or date, not just
 by topic.
+
+---
+
+> **Running on Nuvolos?** Jump straight to
+> [Running TypeScript agent on Nuvolos](#running-typescript-agent-on-nuvolos)
+> — that section has everything you need from install to startup.
 
 ---
 
@@ -139,7 +145,11 @@ See [Evaluation](#evaluation) for what to expect.
 
 ---
 
-## Running on Nuvolos
+## Running on Nuvolos — Python stack (older)
+
+> The TypeScript web server (above) is the recommended way to run on Nuvolos.
+> This section describes the older Python FastAPI + Gradio stack — kept for
+> reference but no longer the primary approach.
 
 The project runs as three separate Nuvolos apps that share an instance-wide
 network. The local TypeScript TUI continues to work unchanged; this section
@@ -404,14 +414,40 @@ on the relevant app (e.g. `export LLM_MODEL=qwen3:14b`).
 
 ## Running TypeScript agent on Nuvolos
 
-The TypeScript web agent replaces the Python FastAPI + Gradio stack with a
-single Express server that serves both the REST API and the HTML frontend on
-one port. The retrieval logic is identical — same BM25, same pgvector, same
-fusion weights — but now implemented in TypeScript and querying PostgreSQL
-directly instead of going through a Python intermediary.
+> This is the **recommended way to run on Nuvolos**. A single Express server
+> handles the API and serves the web UI — no separate Python process needed.
 
-> **One backend at a time:** both the Python backend (`uvicorn`) and the
-> TypeScript server (`npm run web`) bind to port 8500. Run only one at a time.
+### Quick reference — what to run every time
+
+Start the **Database app** in Nuvolos first, then open two terminals in the **Backend VS Code app**:
+
+```bash
+# Terminal 1 — every time you open a new terminal, run this first:
+source ~/.bashrc
+
+# Then start Ollama (CPU):
+ollama serve
+
+# Or GPU (Tesla T4) — faster by ~10×:
+OLLAMA_FLASH_ATTENTION=1 CUDA_VISIBLE_DEVICES=0 ollama serve
+```
+
+```bash
+# Terminal 2 — web server:
+source ~/.bashrc
+cd /files/company-rag-agent
+npm run web
+```
+
+Open the UI at:
+```
+https://<your-hash>.proxy-eu1.nuvolos.cloud/proxy/8500/
+```
+
+> **Important:** `source ~/.bashrc` is required in every new terminal. Without it,
+> `ollama`, `node`, and `npm` commands will not be found.
+
+---
 
 ### Architecture
 
@@ -426,124 +462,148 @@ Backend app  (Express + TypeScript, port 8500)   src/web.ts → src/server.ts
 Database app  (PostgreSQL + pgvector, port 5432)
 ```
 
-The Express server serves the HTML frontend (`frontend/index.html`) as a
-static file and exposes two endpoints:
-- `POST /query` — SSE stream: emits tool events in real-time, then the final answer
-- `GET  /doc/:id` — fetches a full document from `rag_documents`
+The Express server serves `frontend/index.html` as a static file and exposes:
+- `POST /query` — SSE stream: emits real-time tool events, then the final answer
+- `GET /doc/:id` — fetches a full document from `rag_documents`
+- `GET /stats` — chunk and document counts by source type
 
-### Prerequisites
+---
 
-The **Database app** must be running and already indexed (see
-[Running on Nuvolos — first-time setup](#first-time-setup)).
-Ollama must also be running on the Backend app with `qwen3:8b` and
-`nomic-embed-text` pulled (same Ollama setup as the Python stack).
+### One-time setup
 
-### First-time setup — Node.js
+Do these steps once. After this, use the [quick reference](#quick-reference--what-to-run-every-time) above.
 
-Open a terminal in the **Backend VS Code app** and check whether Node.js 22+
-is already available:
+#### Step 1 — Install Ollama to persistent storage
+
+Ollama is not pre-installed on Nuvolos. Install to `/files/bin` — this path
+survives container resets, unlike `~/.local/bin` which is wiped on restart.
 
 ```bash
-node --version   # need v22 or higher
+# Download Ollama binary to persistent storage (no root needed)
+OLLAMA_VERSION=$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest \
+  | grep '"tag_name"' | cut -d'"' -f4)
+mkdir -p /files/bin /files/lib
+curl -fsSL "https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
+     -o /tmp/ollama.tar.zst
+tar -x --zstd -f /tmp/ollama.tar.zst -C /files
+
+# Add Ollama to PATH — persists across sessions
+echo 'export PATH="/files/bin:$PATH"' >> ~/.bashrc
+
+# Point Ollama at the shared model storage so downloaded models survive container resets
+echo 'export OLLAMA_MODELS=/space_mounts/pars/ollama_models' >> ~/.bashrc
+
+source ~/.bashrc
+
+# Verify
+ollama --version
+echo $OLLAMA_MODELS   # should print: /space_mounts/pars/ollama_models
 ```
 
-If not installed, use **nvm** (no root required):
+#### Step 2 — Pull models
 
 ```bash
+# Start Ollama temporarily to pull models
+ollama serve &
+sleep 3
+
+ollama pull nomic-embed-text   # ~274 MB — embedding model
+ollama pull qwen3:8b           # ~5 GB   — LLM
+
+# Confirm both are present
+ollama list
+
+# Stop the background Ollama (use Terminal 1 from startup guide going forward)
+pkill ollama
+```
+
+#### Step 3 — Install Node.js via nvm
+
+```bash
+# Install nvm (no root required)
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
 source ~/.bashrc
+
+# Install and activate Node.js 22
 nvm install 22
 nvm use 22
-node --version   # should print v22.x.x
-```
-
-To make Node 22 the default for new sessions:
-
-```bash
 nvm alias default 22
-echo 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> ~/.bashrc
+
+node --version   # should print v22.x.x
+npm --version
 ```
 
-### First-time setup — install npm dependencies
+#### Step 4 — Clone the repo and install dependencies
 
 ```bash
-cd /files/company-rag-agent
+cd /files
+git clone -b andre-dev https://github.com/EDEN757/company-rag-agent.git
+cd company-rag-agent
 npm install
 ```
 
-This installs all TypeScript dependencies including `pg` (PostgreSQL client)
-and `express`. Takes ~30 seconds; only needs to run once (or after
-`package.json` changes).
+`npm install` takes ~30 seconds. Re-run it if `package.json` changes (e.g.
+after pulling an update that adds new dependencies).
 
-> No separate indexing step is needed — the TypeScript agent queries the
-> same `rag_documents` / `rag_chunks` tables already built by
-> `build_index_pg.py`.
+> No indexing step is needed here — the Database app already contains the
+> `rag_documents` / `rag_chunks` tables built by `build_index_pg.py`.
+> The TypeScript server queries those tables directly.
 
-### Starting up
+---
 
-Run these every time. Make sure the **Database app** is started in Nuvolos first.
+### Pulling updates
 
-**Backend app — Terminal 1** (Ollama):
+When new code is pushed to the repo, update your local copy:
 
 ```bash
 source ~/.bashrc
-# For GPU (Tesla T4): add OLLAMA_FLASH_ATTENTION=1 CUDA_VISIBLE_DEVICES=0
-ollama serve
-```
-
-Expected output:
-
-```
-time=... level=INFO source=routes.go msg="Listening on 127.0.0.1:11434"
-```
-
-**Backend app — Terminal 2** (TypeScript web server):
-
-```bash
 cd /files/company-rag-agent
-npm run web
+git fetch https://github.com/EDEN757/company-rag-agent.git andre-dev
+git reset --hard FETCH_HEAD
+npm install   # only needed if package.json changed
 ```
 
-Expected output:
-
-```
-RAG agent web server running on http://0.0.0.0:8500
-```
-
-The UI is available at:
-
-```
-https://<hash>.proxy-eu1.nuvolos.cloud/proxy/8500/
-```
+---
 
 ### Web UI features
 
 | Control / Panel | What it does |
 |---|---|
-| **Conversation** | Multi-turn chat. `dsid_…` doc IDs in answers are clickable — clicking opens the full document in the viewer panel |
-| **Send / Stop buttons** | Send submits the query. **Stop** closes the SSE connection mid-stream and shows "Search interrupted by user." |
-| **Show sources** | Checkbox. When checked, retrieved chunks appear in the Sources panel with score bars |
-| **Model reasoning** | Checkbox. Activates Qwen3 extended thinking (`think: true` Ollama option). Thinking blocks appear below the assistant message |
-| **Sources panel** | Right-side list of retrieved chunks with title, source type, fused score, and colour-coded score bar. Click any card to open the full document |
-| **Document viewer** | Shows the full document text with query terms highlighted (TF-based: terms most frequent in the document are highlighted in gold) |
-| **Query history** | Bottom bar of clickable chips — last 10 queries. Click to prefill the input box |
-| **Real-time tool events** | The conversation shows inline status while the agent works: `🔍 Searching: "…"`, `📄 Opening dsid_…`, `✏️ Writing document…` |
+| **Example queries** | Shown on first load — click one to paste it into the input box |
+| **Send / Stop buttons** | Send submits. **Stop** cancels immediately and shows "Search interrupted" |
+| **Elapsed timer** | Shows seconds elapsed while a query runs (top-right of header) |
+| **Clear chat** | Resets the conversation, history, and source panels back to the empty state |
+| **Show sources** checkbox | When checked, retrieved chunks appear in the Sources panel after each answer |
+| **Model reasoning** checkbox | Activates Qwen3 extended thinking (`think: true`). Thinking blocks appear below the answer. Slower on CPU (~2–3 min) but more thorough |
+| **Real-time tool events** | Shows `🔍 Searching: "…"`, `📄 Opening dsid_…`, `✏️ Writing document…` as the agent works |
+| **Sources panel** | Retrieved chunks with title, source type, fused score, and colour-coded score bar. Click a card to open the full document in the viewer. Click **↗** to open in a new window |
+| **Document viewer** | Full document text with query terms highlighted in gold. `dsid_…` IDs in answers are also clickable and open in a new window |
+| **Knowledge base panel** | Chunk counts by source type — loaded on page start so you can see what's indexed |
+| **Query history** | Bottom bar of the last 10 queries as clickable chips |
+
+---
 
 ### Troubleshooting
 
-| Symptom | Fix |
-|---|---|
-| `bash: ollama: command not found` | `source ~/.bashrc` — the PATH update in `~/.bashrc` wasn't sourced yet |
-| `ollama list` shows no models | Re-pull: `ollama pull qwen3:8b && ollama pull nomic-embed-text` |
-| `npm: command not found` | `source ~/.bashrc` or re-run `nvm use 22` |
-| Port 8500 already in use | `pkill -f "tsx src/web.ts"` then re-run |
-| 500 on `/query` — DB connect error | Check that the Database app is running; verify `echo $PGHOST` |
+| Symptom | Cause | Fix |
+|---|---|---|
+| `bash: ollama: command not found` | PATH not loaded | `source ~/.bashrc` |
+| `bash: node: command not found` or `bash: npm: command not found` | nvm not loaded | `source ~/.bashrc` |
+| `ollama list` shows no models | Wrong `OLLAMA_MODELS` path or models not pulled | `echo $OLLAMA_MODELS` — must be `/space_mounts/pars/ollama_models`. Re-pull if empty |
+| `Error: could not connect to ollama` | Ollama not running | Start Terminal 1 (`ollama serve`) first |
+| Query shows error after ~30 seconds | Ollama not responding to embedding requests | Check Terminal 1 output; restart `ollama serve` |
+| Query hangs with no timer ticking | Server not running | Check Terminal 2 (`npm run web`) is still alive |
+| `address already in use :8500` | Previous server still running | `pkill -f "tsx src/web"` then re-run |
+| DB connection error on `/query` | Database app not started | Start the Database app in Nuvolos |
+| `npm install` fails with EACCES | Wrong directory | Make sure you're in `/files/company-rag-agent` |
+| Stats panel shows "Could not load stats" | DB not reachable | Check `echo $PGHOST` — must point to the pgvector hostname |
 
-### Environment variables (TypeScript server)
+---
 
-All defaults are set in `src/rag/db-pg.ts`, `src/rag/embed.ts`, and
-`src/server.ts`. Override in `~/.bashrc` on the Backend app only if
-hostnames or models change.
+### Environment variables
+
+Set in `~/.bashrc` on the **Backend app** only if defaults need overriding.
+Defaults are hardcoded in `src/rag/db-pg.ts`, `src/rag/embed.ts`, and `src/server.ts`.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -556,7 +616,7 @@ hostnames or models change.
 | `LLM_MODEL` | `qwen3:8b` | LLM model served by Ollama |
 | `RAG_EMBED_MODEL` | `nomic-embed-text` | Embedding model served by Ollama |
 | `PORT` | `8500` | Express server port |
-| `OLLAMA_MODELS` | `/space_mounts/pars/ollama_models` | Persistent model storage (set in Ollama setup) |
+| `OLLAMA_MODELS` | `/space_mounts/pars/ollama_models` | **Must be set** — persistent model storage across container resets |
 
 ---
 

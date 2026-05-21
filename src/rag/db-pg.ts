@@ -8,6 +8,8 @@ export const pool = new Pool({
   user:     process.env.PGUSER     ?? "nuvolos",
   password: process.env.PGPASSWORD ?? "",
   ssl:      process.env.PGSSLMODE === "require" ? { rejectUnauthorized: false } : false,
+  connectionTimeoutMillis: 10_000,
+  idleTimeoutMillis:       30_000,
 });
 
 export interface ChunkRow {
