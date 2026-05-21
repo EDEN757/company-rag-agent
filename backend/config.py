@@ -10,6 +10,10 @@ DB_USER     = os.environ.get("PGUSER",     "nuvolos")
 DB_PASSWORD = os.environ.get("PGPASSWORD", "nuvolos")
 DB_NAME     = os.environ.get("PGDATABASE", "nuvolos")
 
+RERANKER_MODEL    = os.environ.get("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+USE_RRF           = os.environ.get("USE_RRF",    "true").lower() == "true"
+RRF_K             = 60
+HYDE_ENABLED      = os.environ.get("HYDE_ENABLED", "true").lower() == "true"
 TOP_K_PER_BRANCH  = 8
 VEC_WEIGHT        = 0.7
 KW_WEIGHT         = 0.3

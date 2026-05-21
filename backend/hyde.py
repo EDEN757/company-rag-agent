@@ -1,0 +1,50 @@
+import logging
+import numpy as np
+from openai import OpenAI
+from embed import embed
+from config import OLLAMA_HOST, LLM_MODEL
+
+log = logging.getLogger(__name__)
+_client: OpenAI | None = None
+
+_PROMPT = (
+    "Write one short passage (1-2 sentences) from a company document, email, or chat "
+    "that would directly answer this question:\n\n{query}\n\n"
+    "Write only the passage, no preamble."
+)
+
+
+def init_hyde():
+    global _client
+    _client = OpenAI(base_url=f"{OLLAMA_HOST}/v1", api_key="ollama")
+
+
+def hyde_embed(query: str) -> list[float]:
+    """Return a query embedding averaged with a hypothetical-document embedding.
+
+    Uses a tiny num_ctx (512) so the LLM call is fast (~3-5 s on GPU).
+    Falls back to the raw query embedding on any error.
+    Only affects the dense/vector branch — BM25 still uses the original query text.
+    """
+    if _client is None:
+        return embed(query)
+    try:
+        resp = _client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": _PROMPT.format(query=query)}],
+            max_tokens=80,
+            temperature=0.7,
+            extra_body={"options": {"num_ctx": 512, "think": False}},
+        )
+        hypothetical = resp.choices[0].message.content.strip()
+        log.debug(f"HyDE hypothetical: {hypothetical[:120]}")
+        q_vec = np.array(embed(query), dtype=np.float32)
+        h_vec = np.array(embed(hypothetical), dtype=np.float32)
+        avg = (q_vec + h_vec) / 2.0
+        norm = np.linalg.norm(avg)
+        if norm > 0:
+            avg /= norm
+        return avg.tolist()
+    except Exception as e:
+        log.warning(f"HyDE failed ({e}) — using raw query embedding.")
+        return embed(query)

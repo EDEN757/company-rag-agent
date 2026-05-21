@@ -31,6 +31,8 @@ from pydantic import BaseModel
 
 import agent
 import db
+import hyde
+import reranker
 from config import OLLAMA_HOST, LLM_MODEL, EMBED_MODEL, TABLE_CHUNKS, TABLE_DOCS
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -42,6 +44,8 @@ log = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     db.connect()
     agent.init_client()
+    hyde.init_hyde()
+    reranker.init_reranker()
     log.info(f"LLM: {OLLAMA_HOST}  model={LLM_MODEL}  embed={EMBED_MODEL}")
     log.info("Application startup complete.")
     yield

@@ -487,7 +487,7 @@ no message broker, no daemon.
 
 For each user query `q`:
 
-### 1. Embed the query
+### 1. Embed the query (with HyDE augmentation)
 
 ```
 q_vec = nomic-embed-text(q)      # 768-dim float32, L2-normalized
@@ -495,6 +495,24 @@ q_vec = nomic-embed-text(q)      # 768-dim float32, L2-normalized
 
 Normalization matters because cosine similarity then reduces to a plain
 dot product, which is a single contiguous SIMD-friendly multiply.
+
+**HyDE (Hypothetical Document Embeddings):** before issuing the vector
+search, the LLM generates a short hypothetical answer passage (1–2
+sentences, `max_tokens=80`, `num_ctx=512` for speed). That passage is
+embedded independently and the two vectors are averaged and
+re-normalised:
+
+```
+hyp  = LLM("Write a passage answering: {q}")   # ~3–5 s on GPU
+h_vec = nomic-embed-text(hyp)
+q_vec = normalise((q_vec + h_vec) / 2)
+```
+
+The averaged vector sits closer in embedding space to the kind of text
+that actually answers the question, boosting recall on abstract queries
+where the question wording differs significantly from document language.
+HyDE is applied **only to the vector branch** — BM25 always receives
+the original query text. Set `HYDE_ENABLED=false` to disable.
 
 ### 2. Keyword branch — sparse retrieval (course pillar W1/W2)
 
@@ -541,27 +559,61 @@ No FAISS, no `sqlite-vec`. At 35k vectors this fits in ~100 MB of RAM and
 runs in milliseconds — adding an ANN index would just hide the math the
 course wants us to demonstrate.
 
-### 4. Weighted fusion
+### 4. RRF ordering + weighted fusion score
 
-The two candidate lists are unioned (≤ 16 unique chunks). Each chunk gets a
-final score:
+The two candidate lists are unioned (≤ 16 unique chunks). Two quantities
+are computed per chunk:
+
+**RRF ordering score** (used for ranking, `USE_RRF=true` by default):
 
 ```
-final = 0.7 * vec_score + 0.3 * kw_score
+rrf = 1 / (60 + vec_rank) + 1 / (60 + kw_rank)
 ```
 
-The 0.7/0.3 split is deliberate: BM25 is excellent at exact-term matches
-(e.g. error codes, model IDs, ticket numbers — which appear in many real
-questions), but dense embeddings handle paraphrasing. The vector branch
-generally wins on this dataset, so it carries more weight, while BM25 acts
-as a precision booster for term-heavy queries.
+Reciprocal Rank Fusion (Cormack & Clarke 2009, k=60) is robust because it
+depends only on rank positions, not raw score magnitudes — no manual weight
+tuning is required. Chunks appearing in only one branch still get a partial
+score; chunks appearing in both are boosted.
 
-### 5. Threshold + top-N
+**Weighted fusion score** (always computed; exposed to the LLM as `score`):
 
-Anything below `final ≥ 0.35` is dropped to keep the agent from seeing
-weak hits. Top N (default 6) is returned with `chunk_id`, `doc_id`,
-`source_type`, `title`, `score`, `vec_score`, `kw_score`, and a
-~300-char `preview`.
+```
+fusion_score = 0.7 * vec_score + 0.3 * kw_score
+```
+
+The fusion score is kept for the LLM's benefit (its "Score ≥ 2.0 → strong
+match" intuition relies on this range). The 0.7/0.3 split reflects that
+the vector branch generally wins on this dataset while BM25 acts as a
+precision booster for exact-term queries. Set `USE_RRF=false` to sort by
+fusion score instead of RRF rank.
+
+### 5. Threshold + reranker candidates
+
+Chunks below `fusion_score ≥ 0.35` are dropped. The remaining candidates
+(up to 16) are passed to the cross-encoder reranker.
+
+### 5a. Cross-encoder reranking (course pillar W9)
+
+A `cross-encoder/ms-marco-MiniLM-L-6-v2` model (22 M params, ~85 MB)
+scores each `(query, full_chunk_text)` pair jointly — unlike the
+independent scoring of BM25 and dense retrieval, the cross-encoder sees
+both the query and the passage at once and can capture fine-grained
+relevance cues that bi-encoder embeddings miss.
+
+```
+ce_score[i] = CrossEncoder(query, chunk_text[i])   # ~50 ms for 16 pairs on GPU
+top_n = argsort(-ce_score)[:6]
+```
+
+The model is loaded once at startup. The cross-encoder score is kept
+internal; the LLM still sees the fusion score. Set `RERANKER_MODEL=""`
+to disable. This step addresses the Recall@1 gap: without reranking,
+Recall@1 = 0.67 while Recall@10 = 0.93 — the right document was usually
+retrieved but not ranked first.
+
+The final top-N returned to the LLM includes `chunk_id`, `doc_id`,
+`source_type`, `title`, `score`, `vec_score`, `kw_score`, and a 600-char
+`preview`.
 
 ### 6. Optional structured pre-filter
 
@@ -762,7 +814,9 @@ Re-implements the same fusion math (BM25 + pgvector, 0.7/0.3 weights,
 threshold 0.35) and computes Recall@k, MRR@k, nDCG@k for k ∈ {1, 3, 5, 10}
 against `expected_doc_ids`. Does not start the LLM — runs in a few minutes.
 
-On the first 100 questions of the gold set (baseline, no reranking):
+On the first 100 questions of the gold set:
+
+**Baseline** (weighted fusion only, no reranking):
 
 | k | Recall | MRR | nDCG |
 |---|--------|------|------|
@@ -771,8 +825,10 @@ On the first 100 questions of the gold set (baseline, no reranking):
 | 5 | 0.740 | 0.696 | 0.707 |
 | 10 | **0.930** | 0.720 | 0.767 |
 
-Recall@10 of 0.93 means the right document is in the agent's working set on
-93 % of queries — a strong baseline before adding a cross-encoder reranker.
+Recall@10 = 0.93 means the right document is in the top-10 working set on
+93 % of queries — the cross-encoder reranker's job is to push it to rank 1.
+Recall@1 = 0.67 is the target to beat with RRF + HyDE + reranking (numbers
+will be updated after a full eval run).
 
 ### Level 2 — End-to-end agent quality (`eval_agent.py`)
 
@@ -817,6 +873,49 @@ Of the open small embedders available via Ollama:
 | `nomic-embed-text` | 137M | 768 | **8192** | **Chosen.** Largest context window of the small models — covers the longest emails without truncation, MIT-license-compatible, fast (~25/sec on M-series). |
 | `mxbai-embed-large` | 335M | 1024 | 512 | Higher quality but 512 context would truncate long emails. |
 | `bge-m3` | 560M | 1024 | 8192 | Multilingual; overkill for an English-only business corpus and 4× slower. |
+
+### Why RRF instead of weighted linear fusion
+
+RRF (`1/(k+rank_vec) + 1/(k+rank_kw)`, k=60) is more robust than a fixed
+`0.7·vec + 0.3·kw` weight for two reasons:
+
+- **No magnitude assumption.** BM25 and cosine similarity live on different
+  scales; a linear combination requires a hand-tuned `SCORE_SCALE` constant
+  to make them commensurable. RRF ignores magnitudes and only uses ranks.
+- **No hyperparameter to tune.** The 0.7/0.3 split was chosen by intuition;
+  RRF's k=60 is a well-studied default that performs well across benchmarks
+  without dataset-specific tuning.
+
+The weighted fusion score is still computed and shown to the LLM so its
+"Score ≥ 2.0 → strong match" guidance remains meaningful. Set `USE_RRF=false`
+to revert to sorting by fusion score.
+
+### Why HyDE for query expansion
+
+Questions like "who raised concerns about latency?" don't match the vocabulary
+in a Slack message that says "this is unacceptably slow." HyDE bridges that gap
+by asking the LLM to write a short hypothetical passage that *would* answer the
+question, then averaging its embedding with the raw query embedding. The
+averaged vector sits closer to document-space language.
+
+Trade-off: each search adds one small LLM call (~3–5 s on GPU with
+`num_ctx=512` and `max_tokens=80`). This overhead is acceptable for the
+improvement on abstract questions, and the tiny context window (`num_ctx=512`)
+keeps it much faster than a full agent turn. Set `HYDE_ENABLED=false` to skip.
+
+### Why cross-encoder reranking
+
+Bi-encoder retrieval (BM25 + dense) scores query and document independently
+and cannot capture cross-attention between them. A cross-encoder sees the full
+`(query, passage)` pair and learns fine-grained relevance signals — negation,
+entity matching, causal language — that bi-encoders miss. The gap between
+Recall@1 (0.67) and Recall@10 (0.93) is exactly the gap a cross-encoder
+addresses: the right document is usually retrieved, just not ranked first.
+
+`ms-marco-MiniLM-L-6-v2` (22 M params) was chosen because it is small enough
+to load at startup with negligible VRAM, fast enough (~50 ms for 16 pairs on
+GPU), and trained on the MS MARCO passage ranking task which closely matches
+the Q→passage retrieval setting here.
 
 ### Why pre-filter rather than a third score channel
 
@@ -875,7 +974,7 @@ repo:
 | IR evaluation | W1, W2 | Recall@k, MRR@k, nDCG@k for k ∈ {1, 3, 5, 10} | `indexing/eval_retrieval_pg.py` |
 | End-to-end evaluation | W1, W2 | Source hit rate + fact coverage via live `/query` endpoint | `indexing/eval_agent.py` |
 | Frontend (W10) | W10 | Gradio web UI with reasoning mode toggle, stop button, agent step traces, sourced citations, clickable doc viewer with BM25-term highlighting, and query history | `frontend/app.py` |
-| Re-ranking | W9 | *Not yet implemented* — next step (cross-encoder) | — |
+| Re-ranking | W9 | Cross-encoder reranker (`ms-marco-MiniLM-L-6-v2`) scores all fusion candidates jointly before returning top-N to the LLM | `backend/reranker.py`, `backend/fusion.py` |
 
 ---
 
@@ -942,9 +1041,10 @@ repo:
 
 ## Known limitations and future work
 
-- **No re-ranking yet.** Recall@10 = 0.93 but Recall@1 = 0.67. A
-  cross-encoder rerank pass over the top 20 fused hits (course pillar W9)
-  is the obvious next step to lift Recall@1 closer to Recall@10.
+- **Reranker eval numbers pending.** The baseline Recall@1 = 0.67 was
+  measured before cross-encoder reranking, RRF, and HyDE were added. A
+  fresh run of `eval_retrieval_pg.py` + `eval_agent.py` is needed to
+  quantify the improvement.
 - **Slack chunks have no timestamps.** The source rows don't carry
   per-message dates, so `date_from`/`date_to` filters silently exclude
   Slack. If we get a date-stamped Slack dump later, the chunker just needs
@@ -953,9 +1053,10 @@ repo:
   three `search` calls per question, but a stricter agent harness with a
   hard `maxToolIterations` would be cleaner. Tracked as a Qwen-side
   prompting issue rather than a retrieval one.
-- **No query rewriting.** Some "high-level" questions in the gold set
-  would benefit from a HyDE-style step (embed a hypothetical answer
-  instead of the question). Left out to keep the baseline honest.
+- **HyDE adds latency per search.** Each `search` tool call now includes
+  one small LLM inference (~3–5 s on GPU). For multi-hop questions that
+  call `search` twice, this doubles the HyDE overhead. Set
+  `HYDE_ENABLED=false` if latency is critical.
 - **Eval harness re-embeds queries.** Adding a 500-entry query embedding
   cache would cut eval time roughly in half. Not on the critical path.
 

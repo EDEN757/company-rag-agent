@@ -1,10 +1,13 @@
 import logging
 import db
+import hyde
+import reranker
 from embed import embed
 from bm25 import fts_or_query, bm25_scores, tokenize
 from config import (
     TOP_K_PER_BRANCH, VEC_WEIGHT, KW_WEIGHT,
     SCORE_THRESHOLD, SCORE_SCALE, TABLE_CHUNKS, TABLE_DOCS,
+    USE_RRF, RRF_K, HYDE_ENABLED,
 )
 
 log = logging.getLogger(__name__)
@@ -43,11 +46,13 @@ def search(
     top_n: int = 6,
 ) -> list[dict]:
     top_n = max(1, min(20, top_n))
-    qvec = embed(query)
+    # HyDE: for the vector branch, embed a short hypothetical answer alongside the
+    # raw query and average the two vectors. BM25 always uses the original query text.
+    qvec = hyde.hyde_embed(query) if HYDE_ENABLED else embed(query)
     filter_clauses, filter_params = _build_filters(source_types, date_from, date_to, participant)
     base_where = ("WHERE " + " AND ".join(filter_clauses)) if filter_clauses else ""
 
-    # Vector branch
+    # Vector branch — track insertion rank for RRF
     db.cur.execute(
         f"""SELECT chunk_id, doc_id, source_type, text, ts_from, ts_to,
                    (embedding <=> %s::vector) AS dist
@@ -56,12 +61,16 @@ def search(
         [qvec] + filter_params + [TOP_K_PER_BRANCH],
     )
     vec_scores: dict[int, tuple] = {}
-    for chunk_id, doc_id, source_type, text, ts_from, ts_to, dist in db.cur.fetchall():
+    vec_ranks:  dict[int, int]   = {}
+    for rank, (chunk_id, doc_id, source_type, text, ts_from, ts_to, dist) in \
+            enumerate(db.cur.fetchall(), 1):
+        vec_ranks[chunk_id]  = rank
         vec_scores[chunk_id] = (doc_id, source_type, text, ts_from, ts_to,
                                 (1.0 - float(dist)) * SCORE_SCALE)
 
-    # Keyword branch — OR-joined FTS candidates, reranked by BM25
+    # Keyword branch — OR-joined FTS candidates, reranked by BM25; rank tracked for RRF
     kw_scores: dict[int, tuple] = {}
+    kw_ranks:  dict[int, int]   = {}
     fts_q = fts_or_query(query)
     if fts_q:
         try:
@@ -78,6 +87,7 @@ def search(
             bm25 = bm25_scores(query_terms, [(r[0], r[3]) for r in rows])
             ranked = sorted(rows, key=lambda r: bm25.get(r[0], 0.0), reverse=True)[:TOP_K_PER_BRANCH]
             for rank, (chunk_id, doc_id, source_type, text, ts_from, ts_to) in enumerate(ranked, 1):
+                kw_ranks[chunk_id]  = rank
                 kw_scores[chunk_id] = (doc_id, source_type, text, ts_from, ts_to,
                                        (1 / (1 + rank)) * SCORE_SCALE)
         except Exception as e:
@@ -100,21 +110,36 @@ def search(
         data  = vec_d or kw_d
         vec   = vec_d[5] if vec_d else 0.0
         kw    = kw_d[5]  if kw_d  else 0.0
-        final = VEC_WEIGHT * vec + KW_WEIGHT * kw
-        if final < SCORE_THRESHOLD:
+        # Weighted fusion score — always computed; shown to the LLM so its
+        # "Score >= 2.0 → strong match" intuition remains valid.
+        fusion_score = VEC_WEIGHT * vec + KW_WEIGHT * kw
+        if fusion_score < SCORE_THRESHOLD:
             continue
+        # RRF ordering score — determines rank when USE_RRF is enabled.
+        # Kept internal (_rrf); not exposed to the LLM.
+        rrf_score = (
+            (1.0 / (RRF_K + vec_ranks[cid]) if cid in vec_ranks else 0.0) +
+            (1.0 / (RRF_K + kw_ranks[cid])  if cid in kw_ranks  else 0.0)
+        )
         fused.append({
             "chunk_id":    cid,
             "doc_id":      data[0],
             "source_type": data[1],
             "title":       titles.get(data[0]),
-            "score":       round(final, 3),
+            "score":       round(fusion_score, 3),
             "vec_score":   round(vec, 3),
             "kw_score":    round(kw, 3),
             "preview":     data[2][:600].replace("\n", " ").strip(),
             "ts_from":     data[3],
             "ts_to":       data[4],
+            "_rrf":        rrf_score,
+            "_text":       data[2],
         })
 
-    fused.sort(key=lambda x: x["score"], reverse=True)
-    return fused[:top_n]
+    sort_key = (lambda x: x["_rrf"]) if USE_RRF else (lambda x: x["score"])
+    fused.sort(key=sort_key, reverse=True)
+    reranked = reranker.rerank(query, fused, top_n)
+    for h in reranked:
+        h.pop("_rrf",  None)
+        h.pop("_text", None)
+    return reranked
