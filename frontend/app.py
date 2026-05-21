@@ -37,6 +37,10 @@ _HTML_TAG_RE = re.compile(r'<[^>]+>')
 
 _cancel_event = threading.Event()
 
+# Shared state so JavaScript can poll live trace progress
+_trace_lock  = threading.Lock()
+_trace_state: dict = {"traces": [], "current": "", "running": False}
+
 CSS = """
 .thinking-panel,
 .thinking-panel > div,
@@ -165,6 +169,8 @@ def chat(
 
     actual_history = history_with_loading[:-1] if history_with_loading else []
     _cancel_event.clear()
+    with _trace_lock:
+        _trace_state.update({"traces": [], "current": "", "running": True})
 
     thinking_md  = ("*Reasoning mode is on — waiting for model…*" if enable_thinking
                     else "*Reasoning mode is off — enable the toggle to activate model thinking.*")
@@ -199,6 +205,8 @@ def chat(
 
             for raw in resp.iter_lines():
                 if _cancel_event.is_set():
+                    with _trace_lock:
+                        _trace_state["running"] = False
                     yield _h("⚠️ Search interrupted by user."), thinking_md, traces_md, query_history, _render_history(query_history)
                     return
 
@@ -217,12 +225,17 @@ def chat(
 
                 if etype == "trace_start":
                     current_trace = ev["label"]
+                    with _trace_lock:
+                        _trace_state["current"] = current_trace
                     traces_md = _cur_traces_md(current_trace)
                     yield _h(current_ans), thinking_md, traces_md, query_history, _render_history(query_history)
 
                 elif etype == "trace_done":
                     traces.append(ev["content"])
                     current_trace = ""
+                    with _trace_lock:
+                        _trace_state["traces"] = traces.copy()
+                        _trace_state["current"] = ""
                     traces_md = _cur_traces_md()
                     yield _h(current_ans), thinking_md, traces_md, query_history, _render_history(query_history)
 
@@ -244,6 +257,8 @@ def chat(
                 elif etype == "done":
                     latency_ms  = ev.get("latency_ms", 0)
                     all_sources = ev.get("sources", [])
+                    with _trace_lock:
+                        _trace_state["running"] = False
                     if traces_md:
                         traces_md = traces_md.replace(
                             "**Agent steps:**",
@@ -251,12 +266,18 @@ def chat(
                         )
 
     except requests.exceptions.ConnectionError:
+        with _trace_lock:
+            _trace_state["running"] = False
         yield _h("Cannot reach the backend. Make sure the Backend app is running."), thinking_md, "", query_history, _render_history(query_history)
         return
     except requests.exceptions.Timeout:
+        with _trace_lock:
+            _trace_state["running"] = False
         yield _h("Backend timed out (>300 s)."), thinking_md, traces_md, query_history, _render_history(query_history)
         return
     except Exception as e:
+        with _trace_lock:
+            _trace_state["running"] = False
         yield _h(f"Error: {e}"), thinking_md, traces_md, query_history, _render_history(query_history)
         return
 
@@ -288,22 +309,80 @@ def chat(
 
 def _do_cancel():
     _cancel_event.set()
+    with _trace_lock:
+        _trace_state["running"] = False
 
 
 # ── Gradio UI ──────────────────────────────────────────────────────────────────
 _LINK_FIX_JS = """
 <script>
 (function() {
-  const fix = node => {
+  // ── Open all chatbot links in a new tab ──────────────────────────────────
+  const fixLinks = node => {
     if (node.nodeType !== 1) return;
-    node.querySelectorAll('a[href]').forEach(a => {
+    node.querySelectorAll && node.querySelectorAll('a[href]').forEach(a => {
       a.target = '_blank';
       a.rel = 'noopener noreferrer';
     });
   };
-  new MutationObserver(ms => ms.forEach(m =>
-    m.addedNodes.forEach(fix)
-  )).observe(document.body, { childList: true, subtree: true });
+  new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(fixLinks)))
+    .observe(document.body, { childList: true, subtree: true });
+
+  // ── Live agent-step polling (bypasses proxy WebSocket buffering) ──────────
+  let _poll = null;
+
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function getPanel() {
+    return document.querySelector('.results-panel .prose');
+  }
+
+  function renderTraces(d) {
+    const el = getPanel();
+    if (!el) return;
+    if (!d.traces.length && !d.current) {
+      if (d.running) el.innerHTML = '<em style="color:#888">Searching…</em>';
+      return;
+    }
+    let html = '<strong>Agent steps:</strong><ul style="margin:6px 0 0 18px;padding:0;list-style:disc">';
+    d.traces.forEach(t => { html += '<li><code>' + esc(t) + '</code></li>'; });
+    if (d.current) html += '<li><code>' + esc(d.current) + '</code> ⏳</li>';
+    html += '</ul>';
+    el.innerHTML = html;
+  }
+
+  function startPoll() {
+    stopPoll();
+    const el = getPanel();
+    if (el) el.innerHTML = '<em style="color:#888">Searching…</em>';
+    _poll = setInterval(async () => {
+      try {
+        const r = await fetch('/api/traces');
+        if (!r.ok) return;
+        const d = await r.json();
+        renderTraces(d);
+        if (!d.running) stopPoll();
+      } catch(e) {}
+    }, 600);
+  }
+
+  function stopPoll() {
+    if (_poll) { clearInterval(_poll); _poll = null; }
+  }
+
+  // Start polling on Send button click or Enter in the input
+  document.addEventListener('click', e => {
+    const btn = e.target.closest('button');
+    if (btn && btn.textContent.trim() === 'Send') startPoll();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey &&
+        document.activeElement && document.activeElement.tagName === 'TEXTAREA') {
+      startPoll();
+    }
+  });
 })();
 </script>
 """
@@ -409,6 +488,13 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
 
 # ── Document viewer ────────────────────────────────────────────────────────────
 fastapi_app = FastAPI()
+
+
+@fastapi_app.get("/api/traces")
+def api_traces():
+    """Polled by JavaScript to show live agent steps while Gradio generator is blocked by proxy."""
+    with _trace_lock:
+        return dict(_trace_state)
 
 # Highlight query terms that actually appear in the document, ranked by TF.
 # This shows WHICH words drove the BM25 score (terms the model actually matched),
