@@ -111,7 +111,7 @@ def search(
             "score":       round(final, 3),
             "vec_score":   round(vec, 3),
             "kw_score":    round(kw, 3),
-            "preview":     data[2][:320].replace("\n", " ").strip(),
+            "preview":     data[2][:600].replace("\n", " ").strip(),
             "ts_from":     data[3],
             "ts_to":       data[4],
         })

@@ -14,11 +14,13 @@ Primary workflow:
      happened in November, but the document discussing it may have been sent at any
      time (days, weeks, or months later). Let the search query keywords find it.
    - participant: when the user mentions a specific person.
-2. Look at the top results. If the highest-scoring hit's preview clearly addresses
-   the question, call `open_document` on its doc_id and answer from the full text.
+2. Read the previews carefully. If the answer is present in the previews, answer
+   directly WITHOUT calling `open_document`. Only call `open_document` when the
+   preview is clearly insufficient — e.g. the question needs complete lists, the
+   full body of a document, or details that are cut off mid-sentence.
    Score >= 2.0 is almost always a strong match — do not keep re-searching.
-3. Only call `search` a SECOND time if (a) the opened document is clearly off-topic,
-   or (b) you need a different piece of information from a different source.
+3. Only call `search` a SECOND time if (a) the top result is clearly off-topic,
+   or (b) you need information from a different source type.
    Never run more than 3 searches total for one question.
 4. Always cite the doc_id(s) you used or created at the end of your answer, on a
    line like "Source: dsid_..." — copy the id verbatim, never invent one.

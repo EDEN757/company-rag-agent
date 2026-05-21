@@ -17,6 +17,7 @@ Environment variables (set in ~/.bashrc on the Frontend app):
 """
 
 import html
+import json as _json
 import os
 import re
 import threading
@@ -76,14 +77,9 @@ def _get_stats() -> str:
         return "Stats unavailable — backend not reachable."
 
 
-def _query_backend(
-    question: str,
-    history: list[dict],
-    enable_thinking: bool = False,
-) -> tuple[str, str, str, str]:
-    """Call /query and return (answer, thinking_md, traces_md, sources_md)."""
-    # Build history defensively: handle Gradio 5 list-format content, strip HTML
-    api_history = []
+def _api_history(history: list[dict]) -> list[dict]:
+    """Strip HTML and normalise Gradio message dicts for the backend API."""
+    out = []
     for m in history:
         if not isinstance(m, dict):
             continue
@@ -91,87 +87,49 @@ def _query_backend(
         if isinstance(content, list):
             content = " ".join(c.get("text", "") if isinstance(c, dict) else str(c) for c in content)
         content = _HTML_TAG_RE.sub("", str(content) if content is not None else "")
-        role = m.get("role", "")
-        if role in ("user", "assistant"):
-            api_history.append({"role": role, "content": content})
+        if m.get("role") in ("user", "assistant"):
+            out.append({"role": m["role"], "content": content})
+    return out
 
-    try:
-        resp = requests.post(
-            f"{BACKEND_URL}/query",
-            json={"question": question, "history": api_history, "thinking_mode": enable_thinking},
-            timeout=300,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.exceptions.ConnectionError:
-        return "Cannot reach the backend. Make sure the Backend app is running.", "", "", "*No sources retrieved for this query.*"
-    except requests.exceptions.Timeout:
-        return "Backend timed out (>300 s). The query may be too complex.", "", "", "*No sources retrieved for this query.*"
-    except Exception as e:
-        return f"Error: {e}", "", "", "*No sources retrieved for this query.*"
 
-    # Make doc IDs in the answer clickable links opening in a new tab, with ?q= for highlighting
+def _linkify(text: str, question: str) -> str:
+    """Make doc IDs in text clickable."""
     q_enc = urllib.parse.quote(question, safe="")
-    def _ans_link(m):
+    def _link(m):
         eid = html.escape(m.group(1))
         return f'<a href="doc/{eid}?q={q_enc}" target="_blank" rel="noopener"><code>{eid}</code></a>'
-    answer         = DOC_ID_RE.sub(_ans_link, data.get("answer", ""))
-    sources        = data.get("sources", [])
-    latency        = data.get("latency_ms", 0)
-    tool_traces    = data.get("tool_traces", [])
-    thinking_steps = data.get("thinking_steps", [])
+    return DOC_ID_RE.sub(_link, text)
 
-    # ── Model reasoning ────────────────────────────────────────────────────────
-    if thinking_steps:
-        blocks = "\n\n---\n\n".join(thinking_steps)
-        thinking_md = f"**Model reasoning:**\n\n{blocks}"
-    elif enable_thinking:
-        thinking_md = "*Reasoning mode is on but the model did not emit any reasoning for this query.*"
-    else:
-        thinking_md = "*Reasoning mode is off — enable the toggle to activate model thinking.*"
 
-    # ── Agent step traces ──────────────────────────────────────────────────────
-    traces_md = ""
-    if tool_traces:
-        items = "\n".join(f"- `{t}`" for t in tool_traces)
-        traces_md = f"**Agent steps** &nbsp;*(completed in {latency:.0f} ms)*\n\n{items}"
-
-    # ── Sources ────────────────────────────────────────────────────────────────
+def _build_sources_md(question: str, sources: list[dict]) -> str:
+    if not sources:
+        return "*No sources retrieved for this query.*"
+    q_enc = urllib.parse.quote(question, safe="")
     def _doc_link(doc_id: str) -> str:
         eid = html.escape(doc_id)
         return f'<a href="doc/{eid}?q={q_enc}" target="_blank" rel="noopener"><code>{eid}</code></a>'
-
-    sources_md = "*No sources retrieved for this query.*"
-    if sources:
-        opened  = [s for s in sources if s.get("opened")]
-        found   = [s for s in sources if not s.get("opened")]
-        lines: list[str] = []
-
-        if opened:
-            lines.append("**Read in full:**\n")
-            for s in opened:
-                title    = s.get("title") or s["doc_id"]
-                preview  = s.get("preview", "")[:200]
-                lines.append(
-                    f"**{title}**\n"
-                    f"`{s['source_type']}` &nbsp; {_doc_link(s['doc_id'])}\n"
-                    f"> {preview}…"
-                )
-
-        if found:
-            lines.append(f"**{len(found)} retrieved chunk(s):**\n")
-            for i, s in enumerate(found, 1):
-                title    = s.get("title") or s["doc_id"]
-                preview  = s.get("preview", "")[:200]
-                lines.append(
-                    f"**{i}. {title}**\n"
-                    f"`{s['source_type']}` &nbsp; score: `{s['score']}` &nbsp; {_doc_link(s['doc_id'])}\n"
-                    f"> {preview}…"
-                )
-
-        sources_md = "\n\n".join(lines)
-
-    return answer, thinking_md, traces_md, sources_md
+    opened = [s for s in sources if s.get("opened")]
+    found  = [s for s in sources if not s.get("opened")]
+    lines: list[str] = []
+    if opened:
+        lines.append("**Read in full:**\n")
+        for s in opened:
+            title = s.get("title") or s["doc_id"]
+            lines.append(
+                f"**{title}**\n"
+                f"`{s['source_type']}` &nbsp; {_doc_link(s['doc_id'])}\n"
+                f"> {s.get('preview', '')[:200]}…"
+            )
+    if found:
+        lines.append(f"**{len(found)} retrieved chunk(s):**\n")
+        for i, s in enumerate(found, 1):
+            title = s.get("title") or s["doc_id"]
+            lines.append(
+                f"**{i}. {title}**\n"
+                f"`{s['source_type']}` &nbsp; score: `{s['score']}` &nbsp; {_doc_link(s['doc_id'])}\n"
+                f"> {s.get('preview', '')[:200]}…"
+            )
+    return "\n\n".join(lines)
 
 
 # ── Query history helpers ──────────────────────────────────────────────────────
@@ -190,13 +148,10 @@ def _render_history(entries: list[dict]) -> str:
 def _add_loading(question: str, history: list[dict]) -> list[dict]:
     if not question.strip():
         return history
-    return history + [
-        {"role": "user",      "content": question},
-        {"role": "assistant", "content": "⏳ Working…"},
-    ]
+    return history + [{"role": "user", "content": question}]
 
 
-# ── Chat handler (generator — supports cancellation via stop button) ───────────
+# ── Chat handler (streaming SSE from /query/stream) ────────────────────────────
 def chat(
     question: str,
     history_with_loading: list[dict],
@@ -208,58 +163,127 @@ def chat(
         yield history_with_loading, "", "", query_history, _render_history(query_history)
         return
 
-    # Strip the two loading messages (_add_loading appended) to get actual history
-    actual_history = history_with_loading[:-2] if len(history_with_loading) >= 2 else []
-    loading = history_with_loading
-
+    actual_history = history_with_loading[:-1] if history_with_loading else []
     _cancel_event.clear()
-    result_holder: list = [None]
 
-    def _fetch():
-        result_holder[0] = _query_backend(question, actual_history, enable_thinking)
+    thinking_md  = ("*Reasoning mode is on — waiting for model…*" if enable_thinking
+                    else "*Reasoning mode is off — enable the toggle to activate model thinking.*")
+    traces: list[str] = []
+    current_trace = ""   # label of the tool currently running
+    traces_md    = ""
+    current_ans  = ""
+    all_sources: list[dict] = []
+    latency_ms   = 0.0
 
-    t = threading.Thread(target=_fetch, daemon=True)
-    t.start()
+    def _h(answer_so_far: str = "") -> list[dict]:
+        h = actual_history + [{"role": "user", "content": question}]
+        if answer_so_far:
+            h = h + [{"role": "assistant", "content": answer_so_far}]
+        return h
 
-    while t.is_alive():
-        yield loading, "", "", query_history, _render_history(query_history)
-        t.join(timeout=0.5)
-        if _cancel_event.is_set():
-            interrupted = actual_history + [
-                {"role": "user",      "content": question},
-                {"role": "assistant", "content": "⚠️ Search interrupted by user."},
-            ]
-            yield interrupted, "", "", query_history, _render_history(query_history)
-            return
+    def _cur_traces_md(running_label: str = "") -> str:
+        items = [f"- `{t}`" for t in traces]
+        if running_label:
+            items.append(f"- `{running_label}` ⏳")
+        return ("**Agent steps:**\n\n" + "\n".join(items)) if items else ""
 
-    if _cancel_event.is_set() or result_holder[0] is None:
-        interrupted = actual_history + [
-            {"role": "user",      "content": question},
-            {"role": "assistant", "content": "⚠️ Search interrupted by user."},
-        ]
-        yield interrupted, "", "", query_history, _render_history(query_history)
+    try:
+        with requests.post(
+            f"{BACKEND_URL}/query/stream",
+            json={"question": question, "history": _api_history(actual_history),
+                  "thinking_mode": enable_thinking},
+            stream=True,
+            timeout=300,
+        ) as resp:
+            resp.raise_for_status()
+
+            for raw in resp.iter_lines():
+                if _cancel_event.is_set():
+                    yield _h("⚠️ Search interrupted by user."), thinking_md, traces_md, query_history, _render_history(query_history)
+                    return
+
+                line = raw.decode() if isinstance(raw, bytes) else raw
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
+                try:
+                    ev = _json.loads(data)
+                except Exception:
+                    continue
+
+                etype = ev.get("type")
+
+                if etype == "trace_start":
+                    current_trace = ev["label"]
+                    traces_md = _cur_traces_md(current_trace)
+                    yield _h(current_ans), thinking_md, traces_md, query_history, _render_history(query_history)
+
+                elif etype == "trace_done":
+                    traces.append(ev["content"])
+                    current_trace = ""
+                    traces_md = _cur_traces_md()
+                    yield _h(current_ans), thinking_md, traces_md, query_history, _render_history(query_history)
+
+                elif etype == "token":
+                    current_ans += ev["content"]
+                    yield _h(current_ans), thinking_md, traces_md, query_history, _render_history(query_history)
+
+                elif etype == "retract":
+                    current_ans = ""
+                    yield _h(), thinking_md, traces_md, query_history, _render_history(query_history)
+
+                elif etype == "answer":
+                    current_ans = _linkify(ev["content"], question)
+                    yield _h(current_ans), thinking_md, traces_md, query_history, _render_history(query_history)
+
+                elif etype == "thinking":
+                    thinking_md = f"**Model reasoning:**\n\n{ev['content']}"
+
+                elif etype == "done":
+                    latency_ms  = ev.get("latency_ms", 0)
+                    all_sources = ev.get("sources", [])
+                    if traces_md:
+                        traces_md = traces_md.replace(
+                            "**Agent steps:**",
+                            f"**Agent steps** &nbsp;*(completed in {latency_ms:.0f} ms)*",
+                        )
+
+    except requests.exceptions.ConnectionError:
+        yield _h("Cannot reach the backend. Make sure the Backend app is running."), thinking_md, "", query_history, _render_history(query_history)
+        return
+    except requests.exceptions.Timeout:
+        yield _h("Backend timed out (>300 s)."), thinking_md, traces_md, query_history, _render_history(query_history)
+        return
+    except Exception as e:
+        yield _h(f"Error: {e}"), thinking_md, traces_md, query_history, _render_history(query_history)
         return
 
-    answer, thinking_md, traces_md, sources_md = result_holder[0]
+    # Apply doc-ID links to streamed answer (tokens arrive without HTML)
+    if current_ans and '<a href="doc/' not in current_ans:
+        current_ans = _linkify(current_ans, question)
 
-    new_history = actual_history + [
-        {"role": "user",      "content": question},
-        {"role": "assistant", "content": answer},
-    ]
-    new_qhist = ([{
-        "question":   question,
-        "traces_md":  traces_md,
-        "sources_md": sources_md,
-    }] + query_history)[:MAX_QUERY_HISTORY]
+    if enable_thinking and "**Model reasoning:**" not in thinking_md:
+        thinking_md = "*Reasoning mode is on but the model did not emit any reasoning.*"
+
+    sources_md = _build_sources_md(question, all_sources)
+    new_qhist  = ([{"question": question, "traces_md": traces_md, "sources_md": sources_md}]
+                  + query_history)[:MAX_QUERY_HISTORY]
 
     parts: list[str] = []
     if traces_md:
         parts.append(traces_md)
     if show_sources:
         parts.append(sources_md)
-    combined_md = "\n\n---\n\n".join(parts)
 
-    yield new_history, thinking_md, combined_md, new_qhist, _render_history(new_qhist)
+    yield (
+        _h(current_ans),
+        thinking_md,
+        "\n\n---\n\n".join(parts),
+        new_qhist,
+        _render_history(new_qhist),
+    )
 
 
 def _do_cancel():

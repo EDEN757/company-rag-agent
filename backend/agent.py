@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import time
 
 from openai import OpenAI
 
@@ -95,7 +96,7 @@ def run_agent(
             tool_choice="auto",
             max_tokens=MAX_NEW_TOKENS,
             temperature=TEMPERATURE,
-            extra_body={"options": {"num_ctx": 32768, **({"think": True} if thinking_mode else {})}},
+            extra_body={"options": {"num_ctx": 12288, **({"think": True} if thinking_mode else {})}},
         )
         msg = resp.choices[0].message
         raw_content = msg.content or ""
@@ -149,3 +150,134 @@ def run_agent(
         "Agent reached the maximum number of turns without a final answer.",
         all_sources, traces, thinking_steps,
     )
+
+
+def run_agent_streaming(
+    question: str,
+    history: list[dict],
+    thinking_mode: bool = False,
+):
+    """Generator that yields SSE-ready dicts as the agent runs.
+
+    Event types:
+      trace_start  {"type": "trace_start", "label": str}
+      trace_done   {"type": "trace_done",  "content": str}
+      token        {"type": "token",       "content": str}   # final-answer tokens
+      retract      {"type": "retract"}                       # discard speculative tokens
+      answer       {"type": "answer",      "content": str}   # used when no tokens were streamed
+      thinking     {"type": "thinking",    "content": str}
+      done         {"type": "done", "sources": list, "latency_ms": float}
+    """
+    t0 = time.time()
+    system_content = "/think\n\n" + SYSTEM_PROMPT if thinking_mode else SYSTEM_PROMPT
+    messages: list[dict] = [{"role": "system", "content": system_content}]
+    for h in history[-(MAX_HISTORY_TURNS * 2):]:
+        messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": question})
+
+    all_sources: list[dict] = []
+    traces: list[str] = []
+
+    for _turn in range(MAX_AGENT_TURNS):
+        stream = _client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=messages,
+            tools=TOOLS,
+            tool_choice="auto",
+            stream=True,
+            max_tokens=MAX_NEW_TOKENS,
+            temperature=TEMPERATURE,
+            extra_body={"options": {"num_ctx": 12288, **({"think": True} if thinking_mode else {})}},
+        )
+
+        content_acc: list[str] = []
+        tool_acc: dict[int, dict] = {}
+        speculative_sent = False
+        has_tool_calls = False
+
+        for chunk in stream:
+            delta = chunk.choices[0].delta
+
+            if getattr(delta, "tool_calls", None):
+                has_tool_calls = True
+                for tc in delta.tool_calls:
+                    i = tc.index
+                    if i not in tool_acc:
+                        tool_acc[i] = {"id": "", "name": "", "arguments": ""}
+                    if tc.id:
+                        tool_acc[i]["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            tool_acc[i]["name"] = tc.function.name
+                        if tc.function.arguments:
+                            tool_acc[i]["arguments"] += tc.function.arguments
+
+            if delta.content:
+                content_acc.append(delta.content)
+                # Stream tokens speculatively only on non-thinking, non-tool turns
+                if not has_tool_calls and not thinking_mode:
+                    speculative_sent = True
+                    yield {"type": "token", "content": delta.content}
+
+        full_content = "".join(content_acc)
+        think_text, visible = _extract_thinking(full_content)
+        if think_text:
+            yield {"type": "thinking", "content": think_text}
+
+        if has_tool_calls:
+            if speculative_sent:
+                yield {"type": "retract"}
+
+            messages.append({
+                "role": "assistant",
+                "content": full_content,
+                "tool_calls": [
+                    {"id": tc["id"], "type": "function",
+                     "function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                    for tc in tool_acc.values()
+                ],
+            })
+
+            for tc in sorted(tool_acc.items()):
+                tc = tc[1]
+                try:
+                    args = json.loads(tc["arguments"])
+                except json.JSONDecodeError:
+                    args = {}
+
+                label = _trace_args(tc["name"], args)
+                yield {"type": "trace_start", "label": f"[{tc['name']}] {label}"}
+
+                try:
+                    result_text, hits = execute_tool(tc["name"], args)
+                    all_sources.extend(hits)
+                    summary = _trace_result(tc["name"], result_text, hits)
+                except Exception as e:
+                    result_text = f"Tool error: {e}"
+                    summary = f"error: {str(e)[:50]}"
+                    hits = []
+
+                full_trace = f"[{tc['name']}] {label} → {summary}"
+                traces.append(full_trace)
+                yield {"type": "trace_done", "content": full_trace}
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result_text})
+
+        else:
+            answer = visible.strip()
+            if not answer and think_text:
+                answer = think_text
+            if not answer:
+                answer = "The model did not produce an answer. Please try again."
+
+            if not speculative_sent:
+                yield {"type": "answer", "content": answer}
+
+            yield {
+                "type": "done",
+                "sources": all_sources,
+                "latency_ms": round((time.time() - t0) * 1000, 1),
+            }
+            return
+
+    yield {"type": "answer", "content": "Agent reached the maximum number of turns without a final answer."}
+    yield {"type": "done", "sources": all_sources, "latency_ms": round((time.time() - t0) * 1000, 1)}

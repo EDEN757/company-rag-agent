@@ -42,7 +42,7 @@ def execute_tool(name: str, args: dict) -> tuple[str, list[dict]]:
         hit = {
             "chunk_id": -1, "doc_id": doc["doc_id"], "source_type": doc["source_type"],
             "title": doc["title"], "score": 0.0, "vec_score": 0.0, "kw_score": 0.0,
-            "preview": doc["content"][:320].replace("\n", " ").strip(),
+            "preview": doc["content"][:600].replace("\n", " ").strip(),
             "ts_from": None, "ts_to": None, "opened": True,
         }
         return (
@@ -62,7 +62,7 @@ def execute_tool(name: str, args: dict) -> tuple[str, list[dict]]:
             "chunk_id": -1, "doc_id": doc_id,
             "source_type": args["source_type"], "title": args["title"],
             "score": 0.0, "vec_score": 0.0, "kw_score": 0.0,
-            "preview": args["content"][:320].replace("\n", " ").strip(),
+            "preview": args["content"][:600].replace("\n", " ").strip(),
             "ts_from": args.get("date"), "ts_to": args.get("date"), "opened": True,
         }
         return (
@@ -84,7 +84,7 @@ def execute_tool(name: str, args: dict) -> tuple[str, list[dict]]:
             "source_type": doc["source_type"] if doc else "",
             "title": doc["title"] if doc else args["doc_id"],
             "score": 0.0, "vec_score": 0.0, "kw_score": 0.0,
-            "preview": (doc["content"][:320].replace("\n", " ").strip()) if doc else "",
+            "preview": (doc["content"][:600].replace("\n", " ").strip()) if doc else "",
             "ts_from": None, "ts_to": None, "opened": True,
         }
         return result + f" Include {args['doc_id']} in your answer.", [hit]

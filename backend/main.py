@@ -17,6 +17,7 @@ Run:
     uvicorn main:app --host 0.0.0.0 --port 8500
 """
 
+import json
 import logging
 import re
 import time
@@ -25,6 +26,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import agent
@@ -115,6 +117,25 @@ def get_document(doc_id: str):
     if not doc:
         raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
     return doc
+
+
+@app.post("/query/stream")
+def query_stream(req: QueryRequest):
+    """SSE endpoint — yields events as the agent runs so the UI can update in real time."""
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="Question must not be empty.")
+    history = [h.model_dump() for h in req.history]
+
+    def event_gen():
+        for event in agent.run_agent_streaming(req.question, history, req.thinking_mode):
+            yield f"data: {json.dumps(event)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/query", response_model=QueryResponse)
