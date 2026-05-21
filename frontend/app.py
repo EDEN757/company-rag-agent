@@ -291,7 +291,25 @@ def _do_cancel():
 
 
 # ── Gradio UI ──────────────────────────────────────────────────────────────────
+_LINK_FIX_JS = """
+<script>
+(function() {
+  const fix = node => {
+    if (node.nodeType !== 1) return;
+    node.querySelectorAll('a[href]').forEach(a => {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    });
+  };
+  new MutationObserver(ms => ms.forEach(m =>
+    m.addedNodes.forEach(fix)
+  )).observe(document.body, { childList: true, subtree: true });
+})();
+</script>
+"""
+
 with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
+    gr.HTML(_LINK_FIX_JS)
     query_history_state = gr.State([])
     gr.Markdown(
         "# Company Knowledge Assistant\n"
@@ -309,7 +327,7 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
             msg_box = gr.Textbox(
                 placeholder="Ask a question about company knowledge…",
                 label="Your question",
-                lines=2,
+                lines=1,
                 autofocus=True,
             )
             gr.Examples(
@@ -478,6 +496,7 @@ def view_document(doc_id: str, q: str = ""):
     return HTMLResponse(body)
 
 
+demo.queue()
 app = gr.mount_gradio_app(fastapi_app, demo, path="/")
 
 if __name__ == "__main__":
