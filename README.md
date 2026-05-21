@@ -19,17 +19,18 @@ the open-source models locally.
 
 1. [What this is](#what-this-is)
 2. [Quick start — local](#quick-start--local)
-3. [Running on Nuvolos](#running-on-nuvolos)
-4. [System design](#system-design)
-5. [Retrieval pipeline](#retrieval-pipeline)
-6. [Chunking strategy](#chunking-strategy)
-7. [Tools exposed to the agent](#tools-exposed-to-the-agent)
-8. [The dataset](#the-dataset)
-9. [Evaluation](#evaluation)
-10. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
-11. [Course-pillar mapping](#course-pillar-mapping)
-12. [Project layout](#project-layout)
-13. [Known limitations and future work](#known-limitations-and-future-work)
+3. [Running on Nuvolos — Python stack](#running-on-nuvolos)
+4. [Running TypeScript agent on Nuvolos](#running-typescript-agent-on-nuvolos)
+5. [System design](#system-design)
+6. [Retrieval pipeline](#retrieval-pipeline)
+7. [Chunking strategy](#chunking-strategy)
+8. [Tools exposed to the agent](#tools-exposed-to-the-agent)
+9. [The dataset](#the-dataset)
+10. [Evaluation](#evaluation)
+11. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
+12. [Course-pillar mapping](#course-pillar-mapping)
+13. [Project layout](#project-layout)
+14. [Known limitations and future work](#known-limitations-and-future-work)
 
 ---
 
@@ -197,19 +198,21 @@ pre-installed and the indexer will create all tables.
 #### Step 2 — Install Ollama and pull models (Backend app)
 
 Open a terminal in the **Backend VS Code app**. Ollama is not pre-installed
-and the system install script requires root, so download the binary directly:
+and the system install script requires root, so download the binary directly.
+Install to `/files/bin` — this path is on persistent storage and survives
+container resets, unlike `~/.local/bin` which is wiped on restart.
 
 ```bash
-# Download and install Ollama to user directory (no root needed)
+# Download and install Ollama to persistent storage (no root needed)
 OLLAMA_VERSION=$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-mkdir -p ~/.local
+mkdir -p /files/bin /files/lib
 curl -fsSL "https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
      -o /tmp/ollama.tar.zst
-tar -x --zstd -f /tmp/ollama.tar.zst -C ~/.local
+tar -x --zstd -f /tmp/ollama.tar.zst -C /files
 
 # Persist PATH and model storage location across sessions
-export PATH="$HOME/.local/bin:$PATH"
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+export PATH="/files/bin:$PATH"
+echo 'export PATH="/files/bin:$PATH"' >> ~/.bashrc
 export OLLAMA_MODELS=/space_mounts/pars/ollama_models
 echo 'export OLLAMA_MODELS=/space_mounts/pars/ollama_models' >> ~/.bashrc
 
@@ -220,6 +223,13 @@ ollama pull nomic-embed-text
 ollama pull qwen3:8b
 # Note: 32k context is passed via num_ctx in the API — no custom model needed
 ```
+
+> **GPU acceleration:** if the Backend app has a GPU (e.g. Tesla T4), enable
+> CUDA and flash attention for ~10× faster inference:
+> ```bash
+> OLLAMA_FLASH_ATTENTION=1 CUDA_VISIBLE_DEVICES=0 ollama serve &
+> ```
+> Add both env vars to your `ollama serve` command in the startup guide below.
 
 #### Step 3 — Clone the repo and index the data (Backend app)
 
@@ -376,19 +386,177 @@ on the relevant app (e.g. `export LLM_MODEL=qwen3:14b`).
 
 ### Local vs Nuvolos — what changed
 
-| Aspect | Local (TypeScript TUI) | Nuvolos (Python FastAPI + Gradio) |
+| Aspect | Local (TypeScript TUI) | Nuvolos — Python stack | Nuvolos — TypeScript web |
+|---|---|---|---|
+| Database | SQLite (`data/index/rag.db`) | pgvector (PostgreSQL) | pgvector (PostgreSQL) |
+| Vector search | In-process `Float32Array` matmul | `<=>` cosine operator (pgvector) | `<=>` cosine operator (pgvector) |
+| Keyword search | FTS5 `bm25()` (SQLite built-in) | OR-joined `to_tsquery` → BM25 in Python | OR-joined `to_tsquery` → BM25 in TypeScript |
+| Embedding model | `nomic-embed-text` via Ollama | `nomic-embed-text` via Ollama | `nomic-embed-text` via Ollama |
+| LLM | Qwen 3 8B via Ollama | Qwen 3 8B via Ollama | Qwen 3 8B via Ollama |
+| Fusion weights | `0.7·vec + 0.3·kw`, threshold `0.35` | identical | identical |
+| Max output tokens | 4096 | 512 | 512 |
+| Agent tools | search, open\_document, read, write, edit, bash | + add\_document, edit\_document | + add\_document, edit\_document |
+| Evaluation | `eval_retrieval.py` | `eval_retrieval_pg.py` | `eval_retrieval_pg.py` |
+| Interface | Terminal TUI (`npm start`) | Gradio at `/proxy/7860/` | HTML/JS at `/proxy/8500/` |
+| Server stack | — | Python FastAPI + Gradio (two processes) | TypeScript Express (single process) |
+
+---
+
+## Running TypeScript agent on Nuvolos
+
+The TypeScript web agent replaces the Python FastAPI + Gradio stack with a
+single Express server that serves both the REST API and the HTML frontend on
+one port. The retrieval logic is identical — same BM25, same pgvector, same
+fusion weights — but now implemented in TypeScript and querying PostgreSQL
+directly instead of going through a Python intermediary.
+
+> **One backend at a time:** both the Python backend (`uvicorn`) and the
+> TypeScript server (`npm run web`) bind to port 8500. Run only one at a time.
+
+### Architecture
+
+```
+Browser
+  │  HTTPS /proxy/8500/
+  ▼
+Backend app  (Express + TypeScript, port 8500)   src/web.ts → src/server.ts
+  │  node-postgres (pg) + pgvector               fetch → Ollama (nomic-embed-text)
+  │  Ollama /v1  (port 11434)                    Qwen 3 8B
+  ▼
+Database app  (PostgreSQL + pgvector, port 5432)
+```
+
+The Express server serves the HTML frontend (`frontend/index.html`) as a
+static file and exposes two endpoints:
+- `POST /query` — SSE stream: emits tool events in real-time, then the final answer
+- `GET  /doc/:id` — fetches a full document from `rag_documents`
+
+### Prerequisites
+
+The **Database app** must be running and already indexed (see
+[Running on Nuvolos — first-time setup](#first-time-setup)).
+Ollama must also be running on the Backend app with `qwen3:8b` and
+`nomic-embed-text` pulled (same Ollama setup as the Python stack).
+
+### First-time setup — Node.js
+
+Open a terminal in the **Backend VS Code app** and check whether Node.js 22+
+is already available:
+
+```bash
+node --version   # need v22 or higher
+```
+
+If not installed, use **nvm** (no root required):
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+source ~/.bashrc
+nvm install 22
+nvm use 22
+node --version   # should print v22.x.x
+```
+
+To make Node 22 the default for new sessions:
+
+```bash
+nvm alias default 22
+echo 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> ~/.bashrc
+```
+
+### First-time setup — install npm dependencies
+
+```bash
+cd /files/company-rag-agent
+npm install
+```
+
+This installs all TypeScript dependencies including `pg` (PostgreSQL client)
+and `express`. Takes ~30 seconds; only needs to run once (or after
+`package.json` changes).
+
+> No separate indexing step is needed — the TypeScript agent queries the
+> same `rag_documents` / `rag_chunks` tables already built by
+> `build_index_pg.py`.
+
+### Starting up
+
+Run these every time. Make sure the **Database app** is started in Nuvolos first.
+
+**Backend app — Terminal 1** (Ollama):
+
+```bash
+source ~/.bashrc
+# For GPU (Tesla T4): add OLLAMA_FLASH_ATTENTION=1 CUDA_VISIBLE_DEVICES=0
+ollama serve
+```
+
+Expected output:
+
+```
+time=... level=INFO source=routes.go msg="Listening on 127.0.0.1:11434"
+```
+
+**Backend app — Terminal 2** (TypeScript web server):
+
+```bash
+cd /files/company-rag-agent
+npm run web
+```
+
+Expected output:
+
+```
+RAG agent web server running on http://0.0.0.0:8500
+```
+
+The UI is available at:
+
+```
+https://<hash>.proxy-eu1.nuvolos.cloud/proxy/8500/
+```
+
+### Web UI features
+
+| Control / Panel | What it does |
+|---|---|
+| **Conversation** | Multi-turn chat. `dsid_…` doc IDs in answers are clickable — clicking opens the full document in the viewer panel |
+| **Send / Stop buttons** | Send submits the query. **Stop** closes the SSE connection mid-stream and shows "Search interrupted by user." |
+| **Show sources** | Checkbox. When checked, retrieved chunks appear in the Sources panel with score bars |
+| **Model reasoning** | Checkbox. Activates Qwen3 extended thinking (`think: true` Ollama option). Thinking blocks appear below the assistant message |
+| **Sources panel** | Right-side list of retrieved chunks with title, source type, fused score, and colour-coded score bar. Click any card to open the full document |
+| **Document viewer** | Shows the full document text with query terms highlighted (TF-based: terms most frequent in the document are highlighted in gold) |
+| **Query history** | Bottom bar of clickable chips — last 10 queries. Click to prefill the input box |
+| **Real-time tool events** | The conversation shows inline status while the agent works: `🔍 Searching: "…"`, `📄 Opening dsid_…`, `✏️ Writing document…` |
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `bash: ollama: command not found` | `source ~/.bashrc` — the PATH update in `~/.bashrc` wasn't sourced yet |
+| `ollama list` shows no models | Re-pull: `ollama pull qwen3:8b && ollama pull nomic-embed-text` |
+| `npm: command not found` | `source ~/.bashrc` or re-run `nvm use 22` |
+| Port 8500 already in use | `pkill -f "tsx src/web.ts"` then re-run |
+| 500 on `/query` — DB connect error | Check that the Database app is running; verify `echo $PGHOST` |
+
+### Environment variables (TypeScript server)
+
+All defaults are set in `src/rag/db-pg.ts`, `src/rag/embed.ts`, and
+`src/server.ts`. Override in `~/.bashrc` on the Backend app only if
+hostnames or models change.
+
+| Variable | Default | Purpose |
 |---|---|---|
-| Database | SQLite (`data/index/rag.db`) | pgvector (PostgreSQL) |
-| Vector search | In-process `Float32Array` matmul | `<=>` cosine operator (pgvector), `ivfflat.probes=10` |
-| Keyword search | FTS5 `bm25()` (SQLite built-in) | OR-joined `to_tsquery` candidates → BM25 reranked in Python |
-| Embedding model | `nomic-embed-text` via Ollama | `nomic-embed-text` via Ollama (same) |
-| LLM | Qwen 3 8B via Ollama | Qwen 3 8B via Ollama (same) |
-| Fusion weights | `0.7·vec + 0.3·kw`, threshold `0.35` | identical |
-| Max output tokens | 4096 | 2048 (balanced for CPU inference speed) |
-| Agent tools | search, open\_document, read, write, edit, bash | identical (read/write/edit support `~/` paths) |
-| Evaluation | `eval_retrieval.py` | `eval_retrieval_pg.py` (same metrics) |
-| Re-chunking | `rechunk_source.py` | `rechunk_source_pg.py` |
-| Interface | Terminal TUI | Gradio web UI at `/proxy/7860/` |
+| `PGHOST` | `nv-service-b01d63337fab32ac94f65eb2dc8a62ba` | pgvector hostname |
+| `PGPORT` | `5432` | pgvector port |
+| `PGUSER` | `nuvolos` | DB user |
+| `PGPASSWORD` | `nuvolos` | DB password |
+| `PGDATABASE` | `nuvolos` | DB name |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint (embedding + LLM) |
+| `LLM_MODEL` | `qwen3:8b` | LLM model served by Ollama |
+| `RAG_EMBED_MODEL` | `nomic-embed-text` | Embedding model served by Ollama |
+| `PORT` | `8500` | Express server port |
+| `OLLAMA_MODELS` | `/space_mounts/pars/ollama_models` | Persistent model storage (set in Ollama setup) |
 
 ---
 
@@ -826,7 +994,7 @@ repo:
 | Open foundation models | W6 | Qwen 3 8B + nomic-embed-text (both open) | `src/model.ts`, `indexing/embed.py` |
 | Production engineering | W9 | Resumable indexer, retries, payload-shrinking on 500s, ANALYZE/optimize | `indexing/build_index.py`, `indexing/embed.py` |
 | IR evaluation | W1, W2 | Recall@k, MRR@k, nDCG@k for k ∈ {1, 3, 5, 10} | `indexing/eval_retrieval.py` |
-| Frontend (W10) | W10 | TypeScript TUI (local) + Gradio web UI (Nuvolos) with reasoning mode toggle, stop button, agent step traces, sourced citations, clickable doc viewer with BM25-term highlighting, and query history | `src/main.ts`, `frontend/app.py` |
+| Frontend (W10) | W10 | TypeScript TUI (local) + Gradio web UI (Python/Nuvolos) + HTML/JS web UI (TypeScript/Nuvolos) — all with reasoning mode toggle, stop button, agent step traces, sourced citations, clickable doc viewer with BM25-term highlighting, and query history | `src/main.ts`, `src/server.ts`, `frontend/index.html`, `frontend/app.py` |
 | Re-ranking | W9 | *Not yet implemented* — next step (cross-encoder) | — |
 
 ---
@@ -836,17 +1004,18 @@ repo:
 ```
 .
 ├── README.md                  this file
-├── package.json               TS deps: pi-agent-core, pi-tui, better-sqlite3
+├── package.json               TS deps: pi-agent-core, pi-tui, better-sqlite3, express, pg
 ├── package-lock.json
 ├── tsconfig.json
 ├── Modelfile                  Ollama Modelfile — qwen3:8b with 32k context
 │
-├── backend/                   Python — Nuvolos FastAPI backend
+├── backend/                   Python — Nuvolos FastAPI backend (alternative to TS web server)
 │   ├── main.py                FastAPI agent + hybrid retrieval + Ollama tool loop
 │   └── requirements.txt
 │
-├── frontend/                  Python — Nuvolos Gradio UI
-│   ├── app.py                 Gradio chat interface (port 7860, /proxy/7860)
+├── frontend/                  Web assets + Python Gradio UI
+│   ├── index.html             TypeScript web agent UI (served by Express at /proxy/8500/)
+│   ├── app.py                 Gradio UI for Python backend (port 7860, /proxy/7860/)
 │   └── requirements.txt
 │
 ├── data/
@@ -857,39 +1026,44 @@ repo:
 │   │   └── documents_test.parquet     (1.4 GB, gitignored)
 │   ├── .venv/                          (gitignored)
 │   └── index/
-│       └── rag.db                      (337 MB, gitignored — local only)
+│       └── rag.db                      (337 MB, gitignored — local TUI only)
 │
 ├── indexing/                  Python — one-shot, resumable (shared by both targets)
 │   ├── schema.sql             SQLite schema (local): documents | chunks | FTS5 | meta
 │   ├── schema_pg.sql          pgvector schema (Nuvolos): rag_documents | rag_chunks | rag_meta
 │   ├── chunkers.py            per-source: gmail / slack / document-like
-│   ├── embed.py               Ollama embedding client, retry + payload shrink (shared: local + Nuvolos)
+│   ├── embed.py               Ollama embedding client, retry + payload shrink
 │   ├── build_index.py         local indexer: Parquet → SQLite (commits every 200 chunks)
-│   ├── build_index_pg.py      Nuvolos indexer: Parquet → pgvector (nomic-embed-text via Ollama)
+│   ├── build_index_pg.py      Nuvolos indexer: Parquet → pgvector
 │   ├── rechunk_source.py      re-do one source_type after a chunker change (local)
 │   ├── rechunk_source_pg.py   re-do one source_type after a chunker change (Nuvolos)
 │   ├── eval_retrieval.py      Recall@k / MRR@k / nDCG@k against the gold set (local)
 │   └── eval_retrieval_pg.py   Recall@k / MRR@k / nDCG@k against the gold set (Nuvolos)
 │
-└── src/                       TypeScript — local agent (TUI, unchanged)
-    ├── main.ts                pi-agent-core entrypoint + TUI
-    ├── prompt.ts              system prompt (workflow, ≤3 searches/q, citation format)
+└── src/                       TypeScript — TUI agent (local) + web server (Nuvolos)
+    ├── main.ts                TUI entrypoint — pi-agent-core + pi-tui (npm start)
+    ├── web.ts                 Web server entrypoint — Express on port 8500 (npm run web)
+    ├── server.ts              Express app: SSE /query, GET /doc/:id, all tool logic
+    ├── prompt.ts              system prompt (workflow, ≤3 searches/q, citation rules)
     ├── model.ts               Ollama LLM config (Qwen 3 8B, openai-completions)
-    ├── permissions.ts         interactive tool-call gating (read/write/edit/bash)
+    ├── permissions.ts         interactive tool-call gating for the TUI
     ├── rag/
-    │   ├── db.ts              better-sqlite3 read-only + Float32Array vectors
-    │   ├── embed.ts           Ollama /api/embeddings client (L2-normalized)
-    │   ├── fusion.ts          hybrid search: BM25 + vector + weighted fusion
+    │   ├── db.ts              SQLite: better-sqlite3 read-only + Float32Array vectors (TUI)
+    │   ├── db-pg.ts           PostgreSQL: node-postgres pool + fetchDocument (web server)
+    │   ├── embed.ts           Ollama /api/embeddings client, L2-normalised (shared)
+    │   ├── bm25.ts            BM25 implementation: tokenize, bm25Scores (shared)
+    │   ├── fusion.ts          hybrid search via SQLite FTS5 + in-memory matmul (TUI)
+    │   ├── fusion-pg.ts       hybrid search via pgvector + tsvector BM25 (web server)
     │   ├── smoke.ts           one-shot CLI search for development
     │   └── filter_smoke.ts    sanity tests for the structured filters
-    └── tools/
+    └── tools/                 AgentTool wrappers used by the TUI
         ├── index.ts           tool exports
         ├── search.ts          → src/rag/fusion.ts
         ├── open_document.ts   → src/rag/db.ts (fetchDocument)
         ├── read.ts            local FS — read
         ├── write.ts           local FS — write
         ├── edit.ts            local FS — edit
-        └── bash.ts            local FS — bash
+        └── bash.ts            shell command execution
 ```
 
 ---
