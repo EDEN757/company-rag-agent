@@ -186,30 +186,37 @@ def _render_history(entries: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# ── Loading state helper (sync — renders immediately before generator starts) ──
+def _add_loading(question: str, history: list[dict]) -> list[dict]:
+    if not question.strip():
+        return history
+    return history + [
+        {"role": "user",      "content": question},
+        {"role": "assistant", "content": "⏳ Working…"},
+    ]
+
+
 # ── Chat handler (generator — supports cancellation via stop button) ───────────
 def chat(
     question: str,
-    history: list[dict],
+    history_with_loading: list[dict],
     show_sources: bool,
     enable_thinking: bool,
     query_history: list[dict],
 ):
     if not question.strip():
-        yield history, "", "", query_history, _render_history(query_history)
+        yield history_with_loading, "", "", query_history, _render_history(query_history)
         return
+
+    # Strip the two loading messages (_add_loading appended) to get actual history
+    actual_history = history_with_loading[:-2] if len(history_with_loading) >= 2 else []
+    loading = history_with_loading
 
     _cancel_event.clear()
     result_holder: list = [None]
 
     def _fetch():
-        result_holder[0] = _query_backend(question, history, enable_thinking)
-
-    # Yield loading state BEFORE starting the thread so Gradio renders it immediately
-    loading = history + [
-        {"role": "user",      "content": question},
-        {"role": "assistant", "content": "⏳ Working…"},
-    ]
-    yield loading, "", "", query_history, _render_history(query_history)
+        result_holder[0] = _query_backend(question, actual_history, enable_thinking)
 
     t = threading.Thread(target=_fetch, daemon=True)
     t.start()
@@ -218,14 +225,16 @@ def chat(
         yield loading, "", "", query_history, _render_history(query_history)
         t.join(timeout=0.5)
         if _cancel_event.is_set():
-            interrupted = with_user + [
+            interrupted = actual_history + [
+                {"role": "user",      "content": question},
                 {"role": "assistant", "content": "⚠️ Search interrupted by user."},
             ]
             yield interrupted, "", "", query_history, _render_history(query_history)
             return
 
     if _cancel_event.is_set() or result_holder[0] is None:
-        interrupted = with_user + [
+        interrupted = actual_history + [
+            {"role": "user",      "content": question},
             {"role": "assistant", "content": "⚠️ Search interrupted by user."},
         ]
         yield interrupted, "", "", query_history, _render_history(query_history)
@@ -233,7 +242,7 @@ def chat(
 
     answer, thinking_md, traces_md, sources_md = result_holder[0]
 
-    new_history = history + [
+    new_history = actual_history + [
         {"role": "user",      "content": question},
         {"role": "assistant", "content": answer},
     ]
@@ -271,12 +280,24 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
         with gr.Column(scale=3):
             chatbot = gr.Chatbot(
                 label="Conversation",
+                height=500,
             )
             msg_box = gr.Textbox(
                 placeholder="Ask a question about company knowledge…",
                 label="Your question",
                 lines=2,
                 autofocus=True,
+            )
+            gr.Examples(
+                examples=[
+                    "Who complained about the November invoice spike?",
+                    "What were the action items from the last engineering meeting?",
+                    "Summarize recent Slack discussions about the API migration.",
+                    "Find emails about the Q4 budget review.",
+                    "What decisions were made in the latest Jira sprint planning?",
+                ],
+                inputs=msg_box,
+                label="Example questions",
             )
             with gr.Row():
                 submit_btn  = gr.Button("Send", variant="primary")
@@ -307,27 +328,23 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
                 stats_md    = gr.Markdown(_get_stats())
                 refresh_btn = gr.Button("Refresh")
 
-    gr.Examples(
-        examples=[
-            "Who complained about the November invoice spike?",
-            "What were the action items from the last engineering meeting?",
-            "Summarize recent Slack discussions about the API migration.",
-            "Find emails about the Q4 budget review.",
-            "What decisions were made in the latest Jira sprint planning?",
-        ],
-        inputs=msg_box,
-    )
-
     # ── Event wiring ───────────────────────────────────────────────────────────
-    # Keep references to the generator events so stop_btn can cancel them
-    _submit_event = submit_btn.click(
+    # Two-step: sync _add_loading renders immediately (bypasses proxy buffering),
+    # then the generator chat() runs the backend call.
+    _load_btn = submit_btn.click(
+        fn=_add_loading, inputs=[msg_box, chatbot], outputs=[chatbot],
+    )
+    _submit_event = _load_btn.then(
         fn=chat,
         inputs=[msg_box, chatbot, show_sources, enable_thinking, query_history_state],
         outputs=[chatbot, thinking_box, results_box, query_history_state, history_view],
     )
     _submit_event.then(fn=lambda: "", outputs=msg_box)
 
-    _msg_event = msg_box.submit(
+    _load_msg = msg_box.submit(
+        fn=_add_loading, inputs=[msg_box, chatbot], outputs=[chatbot],
+    )
+    _msg_event = _load_msg.then(
         fn=chat,
         inputs=[msg_box, chatbot, show_sources, enable_thinking, query_history_state],
         outputs=[chatbot, thinking_box, results_box, query_history_state, history_view],
