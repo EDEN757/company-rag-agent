@@ -315,7 +315,7 @@ def _do_cancel():
 
 # ── Gradio UI ──────────────────────────────────────────────────────────────────
 _LINK_FIX_JS = """
-<script>
+<script defer>
 (function() {
   // ── Open all chatbot links in a new tab ──────────────────────────────────
   const fixLinks = node => {
@@ -355,6 +355,7 @@ _LINK_FIX_JS = """
 
   function startPoll() {
     stopPoll();
+    let _pollStarted = false;
     const el = getPanel();
     if (el) el.innerHTML = '<em style="color:#888">Searching…</em>';
     _poll = setInterval(async () => {
@@ -362,8 +363,9 @@ _LINK_FIX_JS = """
         const r = await fetch('api/traces');
         if (!r.ok) return;
         const d = await r.json();
+        if (d.running) _pollStarted = true;
         renderTraces(d);
-        if (!d.running) stopPoll();
+        if (_pollStarted && !d.running) stopPoll();
       } catch(e) {}
     }, 600);
   }
