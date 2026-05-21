@@ -176,16 +176,14 @@ Open a terminal in the **Backend VS Code app**. Ollama is not pre-installed
 and the system install script requires root, so download the binary directly:
 
 ```bash
-# Download and install Ollama to user directory (no root needed)
+# Download and install Ollama to /files/bin (persists across Nuvolos resets)
 OLLAMA_VERSION=$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-mkdir -p ~/.local
+mkdir -p /files/bin /files/lib
 curl -fsSL "https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
      -o /tmp/ollama.tar.zst
-tar -x --zstd -f /tmp/ollama.tar.zst -C ~/.local
+tar -x --zstd -f /tmp/ollama.tar.zst -C /files
 
-# Persist PATH and model storage location across sessions
-export PATH="$HOME/.local/bin:$PATH"
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+# Model storage location (shared, persistent)
 export OLLAMA_MODELS=/space_mounts/pars/ollama_models
 echo 'export OLLAMA_MODELS=/space_mounts/pars/ollama_models' >> ~/.bashrc
 
@@ -201,7 +199,7 @@ ollama pull qwen3:8b
 
 ```bash
 cd /files
-git clone -b Nuvolos https://github.com/andrernd/company-rag-agent.git
+git clone -b andre-dev https://github.com/EDEN757/company-rag-agent.git
 ```
 
 Upload `data/raw/documents_subset.parquet` to `/files/company-rag-agent/data/raw/`
@@ -245,7 +243,7 @@ is started in Nuvolos first.
 
 **Backend app — Terminal 1** (keep open, runs Ollama):
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="/files/bin:$PATH"
 export OLLAMA_MODELS=/space_mounts/pars/ollama_models
 ollama serve
 ```
