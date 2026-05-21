@@ -359,7 +359,7 @@ _LINK_FIX_JS = """
     if (el) el.innerHTML = '<em style="color:#888">Searching…</em>';
     _poll = setInterval(async () => {
       try {
-        const r = await fetch('/api/traces');
+        const r = await fetch('api/traces');
         if (!r.ok) return;
         const d = await r.json();
         renderTraces(d);
@@ -373,22 +373,22 @@ _LINK_FIX_JS = """
   }
 
   // Start polling on Send button click or Enter in the input
+  // (lines=1 renders <input>, not <textarea>, so check both)
   document.addEventListener('click', e => {
     const btn = e.target.closest('button');
-    if (btn && btn.textContent.trim() === 'Send') startPoll();
+    if (btn && /^send$/i.test(btn.textContent.trim())) startPoll();
   });
   document.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey &&
-        document.activeElement && document.activeElement.tagName === 'TEXTAREA') {
-      startPoll();
+    if (e.key === 'Enter' && !e.shiftKey) {
+      const tag = document.activeElement && document.activeElement.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') startPoll();
     }
   });
 })();
 </script>
 """
 
-with gr.Blocks(title="Company Knowledge Assistant", css=CSS) as demo:
-    gr.HTML(_LINK_FIX_JS)
+with gr.Blocks(title="Company Knowledge Assistant", css=CSS, head=_LINK_FIX_JS) as demo:
     query_history_state = gr.State([])
     gr.Markdown(
         "# Company Knowledge Assistant\n"
