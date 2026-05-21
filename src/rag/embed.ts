@@ -15,7 +15,6 @@ export async function embedQuery(text: string): Promise<Float32Array> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ model: MODEL, prompt: text }),
-    signal: AbortSignal.timeout(30_000),
   });
   if (!r.ok) {
     throw new Error(`Ollama embedding request failed: ${r.status} ${await r.text()}`);
