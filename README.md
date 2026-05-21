@@ -187,7 +187,12 @@ tar -x --zstd -f /tmp/ollama.tar.zst -C /files
 export OLLAMA_MODELS=/space_mounts/pars/ollama_models
 echo 'export OLLAMA_MODELS=/space_mounts/pars/ollama_models' >> ~/.bashrc
 
+# If using a GPU Backend app, also set these before starting:
+# export CUDA_VISIBLE_DEVICES=0
+# export OLLAMA_FLASH_ATTENTION=1
+
 # Start the server and pull models (~5.5 GB total)
+export PATH="/files/bin:$PATH"
 ollama serve &
 sleep 2
 ollama pull nomic-embed-text
@@ -237,18 +242,38 @@ Run these every time you want to use the project. Make sure the Database app
 is started in Nuvolos first.
 
 > **Tip:** Nuvolos conda environments do not reliably source `~/.bashrc` on
-> new terminals, so `ollama` and `OLLAMA_MODELS` will not be on your PATH
-> even if you added them in Step 2. Always use the explicit `export` commands
-> below instead of relying on `source ~/.bashrc`.
+> new terminals. Always use the explicit `export` commands below — do not
+> rely on `source ~/.bashrc`.
 
-**Backend app — Terminal 1** (keep open, runs Ollama):
+#### CPU Backend
+
+Use this if your Backend app is a standard CPU instance (2 NCU).
+Expect ~2–5 minutes per LLM response and ~25 embeddings/sec during indexing.
+
+**Terminal 1** (keep open, runs Ollama):
 ```bash
 export PATH="/files/bin:$PATH"
 export OLLAMA_MODELS=/space_mounts/pars/ollama_models
 ollama serve
 ```
 
-**Backend app — Terminal 2** (keep open, runs the API):
+#### GPU Backend
+
+Use this if your Backend app has a GPU allocated. Responses take seconds
+instead of minutes. Add these two extra exports before starting Ollama:
+
+**Terminal 1** (keep open, runs Ollama):
+```bash
+export PATH="/files/bin:$PATH"
+export OLLAMA_MODELS=/space_mounts/pars/ollama_models
+export CUDA_VISIBLE_DEVICES=0
+export OLLAMA_FLASH_ATTENTION=1
+ollama serve
+```
+
+---
+
+**Terminal 2** (same for CPU and GPU — keep open, runs the API):
 ```bash
 cd /files/company-rag-agent/backend
 uvicorn main:app --host 0.0.0.0 --port 8500
@@ -263,7 +288,7 @@ INFO: Application startup complete.
 INFO: Uvicorn running on http://0.0.0.0:8500
 ```
 
-**Frontend app** (keep open, serves the UI):
+**Frontend app** (same for CPU and GPU — keep open, serves the UI):
 ```bash
 cd /files/company-rag-agent/frontend
 python app.py

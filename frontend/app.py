@@ -178,17 +178,12 @@ def _query_backend(
 def _render_history(entries: list[dict]) -> str:
     if not entries:
         return "*No previous queries in this session.*"
-    parts = []
+    lines = []
     for i, e in enumerate(entries, 1):
         q = e["question"]
-        q_label = q[:90] + ("…" if len(q) > 90 else "")
-        section = f"**{i}. {q_label}**"
-        if e["traces_md"]:
-            section += f"\n\n{e['traces_md']}"
-        if e["sources_md"]:
-            section += f"\n\n{e['sources_md']}"
-        parts.append(section)
-    return "\n\n---\n\n".join(parts)
+        q_label = q[:120] + ("…" if len(q) > 120 else "")
+        lines.append(f"{i}. {q_label}")
+    return "\n".join(lines)
 
 
 # ── Chat handler (generator — supports cancellation via stop button) ───────────
@@ -203,6 +198,10 @@ def chat(
         yield history, "", "", query_history, _render_history(query_history)
         return
 
+    # Show user message immediately, before the backend call starts
+    with_user = history + [{"role": "user", "content": question}]
+    yield with_user, "", "", query_history, _render_history(query_history)
+
     _cancel_event.clear()
     result_holder: list = [None]
 
@@ -212,25 +211,20 @@ def chat(
     t = threading.Thread(target=_fetch, daemon=True)
     t.start()
 
-    loading = history + [
-        {"role": "user",      "content": question},
-        {"role": "assistant", "content": "⏳ Searching…"},
-    ]
+    loading = with_user + [{"role": "assistant", "content": "⏳ Working…"}]
 
     while t.is_alive():
         yield loading, "", "", query_history, _render_history(query_history)
         t.join(timeout=0.5)
         if _cancel_event.is_set():
-            interrupted = history + [
-                {"role": "user",      "content": question},
+            interrupted = with_user + [
                 {"role": "assistant", "content": "⚠️ Search interrupted by user."},
             ]
             yield interrupted, "", "", query_history, _render_history(query_history)
             return
 
     if _cancel_event.is_set() or result_holder[0] is None:
-        interrupted = history + [
-            {"role": "user",      "content": question},
+        interrupted = with_user + [
             {"role": "assistant", "content": "⚠️ Search interrupted by user."},
         ]
         yield interrupted, "", "", query_history, _render_history(query_history)
