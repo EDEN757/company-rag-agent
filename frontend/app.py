@@ -198,20 +198,21 @@ def chat(
         yield history, "", "", query_history, _render_history(query_history)
         return
 
-    # Show user message immediately, before the backend call starts
-    with_user = history + [{"role": "user", "content": question}]
-    yield with_user, "", "", query_history, _render_history(query_history)
-
     _cancel_event.clear()
     result_holder: list = [None]
 
     def _fetch():
         result_holder[0] = _query_backend(question, history, enable_thinking)
 
+    # Yield loading state BEFORE starting the thread so Gradio renders it immediately
+    loading = history + [
+        {"role": "user",      "content": question},
+        {"role": "assistant", "content": "⏳ Working…"},
+    ]
+    yield loading, "", "", query_history, _render_history(query_history)
+
     t = threading.Thread(target=_fetch, daemon=True)
     t.start()
-
-    loading = with_user + [{"role": "assistant", "content": "⏳ Working…"}]
 
     while t.is_alive():
         yield loading, "", "", query_history, _render_history(query_history)
