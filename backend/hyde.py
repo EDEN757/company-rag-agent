@@ -11,7 +11,7 @@ _client: OpenAI | None = None
 _pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="hyde-embed")
 
 _PROMPT = (
-    "Write one short passage (1-2 sentences) from a company document, email, or chat "
+    "/no_think Write one short passage (1-2 sentences) from a company document, email, or chat "
     "that would directly answer this question:\n\n{query}\n\n"
     "Write only the passage, no preamble."
 )
