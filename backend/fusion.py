@@ -53,6 +53,9 @@ def search(
     top_n = max(1, min(20, top_n))
     filter_clauses, filter_params = _build_filters(source_types, date_from, date_to, participant)
     base_where = ("WHERE " + " AND ".join(filter_clauses)) if filter_clauses else ""
+    # The vector branch LEFT JOINs rag_documents (which also has source_type), so qualify
+    # the column to avoid "column reference is ambiguous" from PostgreSQL.
+    vec_base_where = base_where.replace("source_type IN", "c.source_type IN")
 
     # Submit HyDE to the thread pool immediately — it only calls Ollama HTTP, no DB access.
     # BM25 runs on the caller thread concurrently while HyDE generates the hypothetical doc.
@@ -98,14 +101,12 @@ def search(
         vec_scores: dict[int, tuple] = {}
         vec_ranks:  dict[int, int]   = {}
         titles: dict[str, str | None] = {}
-        # All filter columns (source_type, ts_from, ts_to, participants_json) exist
-        # only in TABLE_CHUNKS so no table alias is needed in the WHERE clause.
         cur.execute(
             f"""SELECT c.chunk_id, c.doc_id, c.source_type, c.text, c.ts_from, c.ts_to,
                        (c.embedding <=> %s::vector) AS dist, d.title
                 FROM   {TABLE_CHUNKS} c
                 LEFT JOIN {TABLE_DOCS} d ON c.doc_id = d.doc_id
-                {base_where}
+                {vec_base_where}
                 ORDER  BY dist ASC LIMIT %s""",
             [qvec] + filter_params + [TOP_K_PER_BRANCH],
         )

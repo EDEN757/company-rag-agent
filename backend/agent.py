@@ -91,7 +91,7 @@ def run_agent(
     history: list[dict],
     thinking_mode: bool = False,
 ) -> tuple[str, list[dict], list[str], list[str]]:
-    system_content = "/think\n\n" + SYSTEM_PROMPT if thinking_mode else SYSTEM_PROMPT
+    system_content = "/think\n\n" + SYSTEM_PROMPT if thinking_mode else "/no_think\n\n" + SYSTEM_PROMPT
     messages: list[dict] = [{"role": "system", "content": system_content}]
     for h in history[-(MAX_HISTORY_TURNS * 2):]:
         messages.append({"role": h["role"], "content": h["content"]})
@@ -183,7 +183,7 @@ def run_agent_streaming(
       done         {"type": "done", "sources": list, "latency_ms": float}
     """
     t0 = time.time()
-    system_content = "/think\n\n" + SYSTEM_PROMPT if thinking_mode else SYSTEM_PROMPT
+    system_content = "/think\n\n" + SYSTEM_PROMPT if thinking_mode else "/no_think\n\n" + SYSTEM_PROMPT
     messages: list[dict] = [{"role": "system", "content": system_content}]
     for h in history[-(MAX_HISTORY_TURNS * 2):]:
         messages.append({"role": h["role"], "content": h["content"]})
