@@ -184,8 +184,8 @@ curl -fsSL "https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}
 tar -x --zstd -f /tmp/ollama.tar.zst -C /files
 
 # Model storage location (shared, persistent)
-export OLLAMA_MODELS=/space_mounts/pars/ollama_models
-echo 'export OLLAMA_MODELS=/space_mounts/pars/ollama_models' >> ~/.bashrc
+export OLLAMA_MODELS=/files/ollama_models
+echo 'export OLLAMA_MODELS=/files/ollama_models' >> ~/.bashrc
 
 # If using a GPU Backend app, also set these before starting:
 # export CUDA_VISIBLE_DEVICES=0
@@ -253,7 +253,7 @@ Expect ~2–5 minutes per LLM response and ~25 embeddings/sec during indexing.
 **Terminal 1** (keep open, runs Ollama):
 ```bash
 export PATH="/files/bin:$PATH"
-export OLLAMA_MODELS=/space_mounts/pars/ollama_models
+export OLLAMA_MODELS=/files/ollama_models
 ollama serve
 ```
 
@@ -265,7 +265,7 @@ instead of minutes. Add these two extra exports before starting Ollama:
 **Terminal 1** (keep open, runs Ollama):
 ```bash
 export PATH="/files/bin:$PATH"
-export OLLAMA_MODELS=/space_mounts/pars/ollama_models
+export OLLAMA_MODELS=/files/ollama_models
 export CUDA_VISIBLE_DEVICES=0
 export OLLAMA_FLASH_ATTENTION=1
 ollama serve
@@ -395,7 +395,7 @@ on the relevant app (e.g. `export LLM_MODEL=qwen3:14b`).
 | `PGDATABASE` | `nuvolos` | DB name |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
 | `LLM_MODEL` | `qwen3:8b` | Model name in Ollama (`num_ctx 32768` is passed via API) |
-| `OLLAMA_MODELS` | `/space_mounts/pars/ollama_models` | Shared Ollama model storage (set in Step 2) |
+| `OLLAMA_MODELS` | `/files/ollama_models` | Shared Ollama model storage (set in Step 2) |
 | `EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model used by the backend API |
 | `RAG_EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model used by the indexer (`embed.py`) |
 
