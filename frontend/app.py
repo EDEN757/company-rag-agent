@@ -431,11 +431,11 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS, head=_LINK_FIX_JS) 
             )
             gr.Examples(
                 examples=[
-                    "Who complained about the November invoice spike?",
-                    "What were the action items from the last engineering meeting?",
-                    "Summarize recent Slack discussions about the API migration.",
-                    "Find emails about the Q4 budget review.",
-                    "What decisions were made in the latest Jira sprint planning?",
+                    "What is Redwood Inference's mission statement?",
+                    "What are the four main revenue streams in Redwood Inference's business model?",
+                    "In the SOC2 readiness notes, what log retention duration is mentioned as a risk for some environments?",
+                    "When is the 48-hour throughput and latency benchmark on the dedicated pool due to be completed?",
+                    "What caused the EU-West activation funnel and onboarding email issues in late January, and which code/config changes fixed it?",
                 ],
                 inputs=msg_box,
                 label="Example questions",

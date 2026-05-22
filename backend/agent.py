@@ -17,7 +17,20 @@ log = logging.getLogger(__name__)
 
 THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
+_FS_MARKERS = ("/files", "/space_mounts", "bash", "terminal", "script")
+_TOOL_ORDER = ("search", "open_document", "add_document", "edit_document", "read", "write", "edit", "bash")
+
 _client: OpenAI | None = None
+
+
+def _select_tools(question: str) -> list[dict]:
+    """Always expose all 4 KB tools; only gate filesystem tools behind explicit markers."""
+    q = question.lower()
+    names: set[str] = {"search", "open_document", "add_document", "edit_document"}
+    if any(m in q for m in _FS_MARKERS):
+        names |= {"read", "write", "edit", "bash"}
+    by_name = {t["function"]["name"]: t for t in TOOLS}
+    return [by_name[n] for n in _TOOL_ORDER if n in names]
 
 
 def init_client():
@@ -87,12 +100,13 @@ def run_agent(
     all_sources: list[dict] = []
     traces: list[str] = []
     thinking_steps: list[str] = []
+    selected_tools = _select_tools(question)
 
     for _ in range(MAX_AGENT_TURNS):
         resp = _client.chat.completions.create(
             model=LLM_MODEL,
             messages=messages,
-            tools=TOOLS,
+            tools=selected_tools,
             tool_choice="auto",
             max_tokens=MAX_NEW_TOKENS,
             temperature=TEMPERATURE,
@@ -177,12 +191,13 @@ def run_agent_streaming(
 
     all_sources: list[dict] = []
     traces: list[str] = []
+    selected_tools = _select_tools(question)
 
     for _turn in range(MAX_AGENT_TURNS):
         stream = _client.chat.completions.create(
             model=LLM_MODEL,
             messages=messages,
-            tools=TOOLS,
+            tools=selected_tools,
             tool_choice="auto",
             stream=True,
             max_tokens=MAX_NEW_TOKENS,

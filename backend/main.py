@@ -30,6 +30,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import agent
+import bm25
 import db
 import hyde
 import reranker
@@ -43,6 +44,7 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.connect()
+    bm25.init_corpus_stats()
     agent.init_client()
     hyde.init_hyde()
     reranker.init_reranker()
@@ -100,19 +102,17 @@ def health():
 
 @app.get("/stats")
 def stats():
-    db.cur.execute(f"SELECT COUNT(*) FROM {TABLE_CHUNKS};")
-    n_chunks = db.cur.fetchone()[0]
-    db.cur.execute(f"SELECT COUNT(*) FROM {TABLE_DOCS};")
-    n_docs = db.cur.fetchone()[0]
-    db.cur.execute(
-        f"SELECT source_type, COUNT(*) FROM {TABLE_CHUNKS} "
-        f"GROUP BY source_type ORDER BY COUNT(*) DESC;"
-    )
-    return {
-        "chunks":    n_chunks,
-        "documents": n_docs,
-        "by_source": {r[0]: r[1] for r in db.cur.fetchall()},
-    }
+    with db.cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) FROM {TABLE_CHUNKS};")
+        n_chunks = cur.fetchone()[0]
+        cur.execute(f"SELECT COUNT(*) FROM {TABLE_DOCS};")
+        n_docs = cur.fetchone()[0]
+        cur.execute(
+            f"SELECT source_type, COUNT(*) FROM {TABLE_CHUNKS} "
+            f"GROUP BY source_type ORDER BY COUNT(*) DESC;"
+        )
+        by_source = {r[0]: r[1] for r in cur.fetchall()}
+    return {"chunks": n_chunks, "documents": n_docs, "by_source": by_source}
 
 
 @app.get("/document/{doc_id}")

@@ -1,3 +1,4 @@
+import concurrent.futures
 import logging
 import numpy as np
 from openai import OpenAI
@@ -6,6 +7,7 @@ from config import OLLAMA_HOST, LLM_MODEL
 
 log = logging.getLogger(__name__)
 _client: OpenAI | None = None
+_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="hyde-embed")
 
 _PROMPT = (
     "Write one short passage (1-2 sentences) from a company document, email, or chat "
@@ -29,6 +31,10 @@ def hyde_embed(query: str) -> list[float]:
     if _client is None:
         return embed(query)
     try:
+        # Embed the raw query immediately — runs concurrently while the LLM generates
+        # the hypothetical document (LLM call is the bottleneck at ~3-5s).
+        q_future = _pool.submit(embed, query)
+
         resp = _client.chat.completions.create(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": _PROMPT.format(query=query)}],
@@ -38,8 +44,10 @@ def hyde_embed(query: str) -> list[float]:
         )
         hypothetical = resp.choices[0].message.content.strip()
         log.debug(f"HyDE hypothetical: {hypothetical[:120]}")
-        q_vec = np.array(embed(query), dtype=np.float32)
+
         h_vec = np.array(embed(hypothetical), dtype=np.float32)
+        q_vec = np.array(q_future.result(timeout=30.0), dtype=np.float32)
+
         avg = (q_vec + h_vec) / 2.0
         norm = np.linalg.norm(avg)
         if norm > 0:

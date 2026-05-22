@@ -17,13 +17,13 @@ HYDE_ENABLED      = os.environ.get("HYDE_ENABLED", "true").lower() == "true"
 TOP_K_PER_BRANCH  = 8
 VEC_WEIGHT        = 0.7
 KW_WEIGHT         = 0.3
-SCORE_THRESHOLD   = 0.35
+SCORE_THRESHOLD   = 0.5
 SCORE_SCALE       = 4.0
 BM25_K1           = 1.5
 BM25_B            = 0.75
 MAX_AGENT_TURNS   = 6
-MAX_HISTORY_TURNS = 10
-MAX_NEW_TOKENS    = 2048
+MAX_HISTORY_TURNS = 5
+MAX_NEW_TOKENS    = 1000
 TEMPERATURE       = 0.1
 MAX_EMBED_CHARS   = 6000
 TABLE_DOCS        = "rag_documents"

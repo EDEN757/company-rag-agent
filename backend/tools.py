@@ -20,7 +20,7 @@ def execute_tool(name: str, args: dict) -> tuple[str, list[dict]]:
             top_n=args.get("top_n", 6),
         )
         if not hits:
-            return "No results above the fusion threshold. Try broadening the query or removing filters.", []
+            return "No results found. Try broadening the query or removing filters.", []
         lines = []
         for h in hits:
             ts_from, ts_to = h.get("ts_from") or "", h.get("ts_to") or ""
@@ -28,10 +28,12 @@ def execute_tool(name: str, args: dict) -> tuple[str, list[dict]]:
                 f" [{ts_from} → {ts_to}]" if ts_from and ts_to and ts_to != ts_from
                 else (f" [{ts_from}]" if ts_from else "")
             )
+            score_str = f"score={h['score']} vec={h['vec_score']} kw={h['kw_score']}"
+            if "rerank_score" in h:
+                score_str += f" rerank={h['rerank_score']:.2f}"
             lines.append(
                 f"#{h['chunk_id']} (doc={h['doc_id']}, source={h['source_type']}{time_str}, "
-                f"score={h['score']} vec={h['vec_score']} kw={h['kw_score']})\n"
-                f"title: {h['title'] or ''}\npreview: {h['preview']}"
+                f"{score_str})\ntitle: {h['title'] or ''}\npreview: {h['preview']}"
             )
         return "\n\n".join(lines), hits
 
