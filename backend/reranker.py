@@ -11,9 +11,11 @@ def init_reranker():
         log.info("Reranker disabled (RERANKER_MODEL is empty).")
         return
     try:
+        import torch
         from sentence_transformers import CrossEncoder
-        log.info(f"Loading cross-encoder reranker: {RERANKER_MODEL}")
-        _model = CrossEncoder(RERANKER_MODEL, max_length=512)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        log.info(f"Loading cross-encoder reranker: {RERANKER_MODEL} (device={device})")
+        _model = CrossEncoder(RERANKER_MODEL, max_length=512, device=device)
         log.info("Cross-encoder reranker ready.")
     except Exception as e:
         log.warning(f"Could not load reranker ({e}) — falling back to fusion order.")
