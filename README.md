@@ -2,10 +2,10 @@
 
 A **hand-rolled** Retrieval-Augmented Generation agent for company knowledge — documents,
 emails, and chats — built from scratch without any integrated RAG framework. The system
-runs a multi-stage hybrid retrieval pipeline (BM25 + dense vector + HyDE query expansion
-+ cross-encoder reranking) over ~35,000 chunks from a 10,000-document corpus spanning
-nine source types, and exposes the results through a multi-turn LLM agent with
-tool-calling and a streaming Gradio UI.
+runs a multi-stage hybrid retrieval pipeline (BM25 + dense vector + optional HyDE query
+expansion + cross-encoder reranking) over ~35,000 chunks from a 10,000-document corpus
+spanning nine source types, and exposes the results through a multi-turn LLM agent with
+tool-calling and a Gradio UI.
 
 Built for the **UZH FS2026 RAG** course. Every retrieval primitive is implemented in
 this repository; only Ollama is used to serve open-source models locally.
@@ -44,7 +44,7 @@ knowledge base, for example:
 It does this by running a five-stage retrieval pipeline — keyword search, vector search,
 RRF fusion, deduplication, and cross-encoder reranking — and then handing the top results
 to a Qwen 3 8B agent that can call `search`, `open_document`, `add_document`,
-`edit_document`, `read`, `write`, `edit`, and `bash` tools over up to six turns before
+`edit_document`, `read`, `write`, `edit`, and `bash` tools over up to three turns before
 producing a cited answer.
 
 New documents can be added or edited through the same interface; the knowledge base
@@ -198,7 +198,7 @@ Override in `~/.bashrc` on the relevant app only if defaults need to change.
 | `LLM_MODEL` | `qwen3:8b` | LLM served via Ollama |
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding model |
 | `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder (set empty to disable) |
-| `HYDE_ENABLED` | `true` | HyDE query expansion (set `false` to skip) |
+| `HYDE_ENABLED` | `false` | HyDE query expansion (set `true` to enable — adds ~5 s per search) |
 | `USE_RRF` | `true` | Sort by RRF rank (`false` = sort by fusion score) |
 
 **Frontend app:**
@@ -216,7 +216,7 @@ Override in `~/.bashrc` on the relevant app only if defaults need to change.
 | **Conversation** | Multi-turn chat; doc IDs in answers are clickable links that open the document viewer |
 | **Send / Stop** | Stop cancels an in-progress search mid-stream |
 | **Show retrieved sources** | Checkbox — shows retrieved chunks and opened documents in the agent steps panel |
-| **Reasoning mode** | Activates Qwen3's extended thinking (`/think` token + `think: true`). Model emits `<think>…</think>` blocks visible in the Model reasoning accordion. Slower but more thorough on complex queries |
+| **Reasoning mode** | Activates Qwen3's extended thinking via `/think` prefix in the user message. Model emits `<think>…</think>` blocks visible in the Model reasoning accordion. Slower but more thorough on complex queries. Off by default (`/no_think` prefix suppresses thinking) |
 | **Agent steps & sources** | Every tool call trace (e.g. `[search] "invoice spike" → 3 result(s)`) plus sources |
 | **Document viewer** | Opens at `/doc/{doc_id}?q={query}`. Highlights query terms ranked by term-frequency in the document |
 | **Query history** | Last 5 queries with their agent steps and sources — resets on page refresh |
@@ -232,10 +232,10 @@ Override in `~/.bashrc` on the relevant app only if defaults need to change.
     ▼
   ┌─────────────────────────────────────────────────────────────────┐
   │  Frontend  (Gradio + FastAPI, port 7860)   frontend/app.py     │
-  │  · Streaming SSE consumer (real-time agent step display)        │
+  │  · Blocking POST to /query (Nuvolos proxy buffers SSE)          │
   │  · Document viewer with BM25-term highlighting                  │
   └───────────────────────────┬─────────────────────────────────────┘
-                              │  HTTP POST /query/stream (SSE)
+                              │  HTTP POST /query (blocking)
                               ▼
   ┌─────────────────────────────────────────────────────────────────┐
   │  Backend  (FastAPI + uvicorn, port 8500)   backend/main.py     │
@@ -250,8 +250,8 @@ Override in `~/.bashrc` on the relevant app only if defaults need to change.
   │         │   │             │  Ollama (port 11434)  │              │
   │         │   │  ┌──────────▼────────┐              │              │
   │         │   │  │  qwen3:8b         │              │              │
-  │         │   │  │  num_ctx=12288    │              │              │
-  │         │   │  │  max_tokens=1000  │              │              │
+  │         │   │  │  num_ctx=4096     │              │              │
+  │         │   │  │  max_tokens=800   │              │              │
   │         │   │  └───────────────────┘              │              │
   │         │   │  ┌────────────────────┐             │              │
   │         │   │  │  nomic-embed-text  │             │              │
@@ -430,9 +430,10 @@ tools. The write path is designed for atomicity and correctness:
        │
        ▼
   ┌──────────────────────────────────────────────────────┐
-  │  agent.run_agent_streaming()  (≤ MAX_AGENT_TURNS=6)  │
+  │  agent.run_agent()  (≤ MAX_AGENT_TURNS=3)            │
   │                                                       │
   │  System prompt (intent routing table, citation rules) │
+  │  + /think or /no_think prefix in user message        │
   │  + history[-MAX_HISTORY_TURNS×2:] (last 5 turns)     │
   │  + user question                                      │
   │                                                       │
@@ -443,13 +444,11 @@ tools. The write path is designed for atomicity and correctness:
   │            read, write, edit, bash                    │
   │                                                       │
   │  Each turn:                                           │
-  │  1. LLM call → tool_calls or final answer             │
+  │  1. LLM call (tool_choice=required on turn 0)        │
+  │     → tool_calls or final answer                      │
   │  2. execute_tool() dispatches to fusion/kb/fs         │
   │  3. Tool result appended to message list              │
   │  4. Repeat until no tool call or turn limit hit       │
-  │                                                       │
-  │  Streaming: SSE events emitted per token/trace        │
-  │  (trace_start → trace_done → token → done)            │
   └──────────────────────────────────────────────────────┘
        │
        ▼
@@ -718,8 +717,9 @@ immediately when `hyde_embed()` is called, running concurrently with the LLM cal
 the hypothetical document (~3–5 s on GPU). By the time the LLM returns, the query
 embedding is already done — saving one sequential embed call per search.
 
-Trade-off: each `search` call adds one small LLM call (`num_ctx=512`, `max_tokens=80`).
-Set `HYDE_ENABLED=false` to skip.
+Trade-off: each `search` call adds one small LLM call (`num_ctx=512`, `max_tokens=80`),
+adding ~5 s per search. **HyDE is disabled by default** (`HYDE_ENABLED=false`) for this
+reason. Set `HYDE_ENABLED=true` to enable on deployments where latency is not critical.
 
 ### Why cross-encoder reranking
 
@@ -785,8 +785,8 @@ single round-trip regardless of document size.
 | Dense retrieval | W3 | `nomic-embed-text` via Ollama + pgvector cosine (`<=>`) | `backend/embed.py`, `backend/fusion.py` |
 | Hybrid retrieval | W3 | RRF fusion + weighted score (0.7·vec + 0.3·kw) | `backend/fusion.py`, `backend/config.py` |
 | Chunking | W9 | Paragraph-aware smart chunking + per-source semantic headers | `indexing/chunkers.py`, `backend/kb.py` |
-| LM decoding | W4 | Qwen 3 8B via Ollama OpenAI-compatible endpoint (`num_ctx=12288`) | `backend/config.py`, `backend/agent.py` |
-| LM prompting | W5 | Intent-routing system prompt, citation rules, ≤3-search cap, no-narration rule | `backend/prompt.py` |
+| LM decoding | W4 | Qwen 3 8B via Ollama OpenAI-compatible endpoint (`num_ctx=4096`, `max_tokens=800`) | `backend/config.py`, `backend/agent.py` |
+| LM prompting | W5 | Intent-routing system prompt, citation rules, ≤3-search cap, no-filter-invention rule, `/no_think` prefix for thinking control | `backend/prompt.py` |
 | Open foundation models | W6 | Qwen 3 8B + nomic-embed-text (Apache-2.0, served via Ollama) | `backend/config.py` |
 | Query expansion | W9 | HyDE: LLM-generated hypothetical passage averaged with raw query embedding | `backend/hyde.py` |
 | Re-ranking | W9 | Cross-encoder `ms-marco-MiniLM-L-6-v2` scores `(query, chunk)` pairs jointly | `backend/reranker.py` |
@@ -820,7 +820,7 @@ single round-trip regardless of document size.
 │   └── requirements.txt
 │
 ├── frontend/                  Python — Gradio web UI
-│   ├── app.py                 Streaming SSE consumer, document viewer, query history
+│   ├── app.py                 Blocking POST consumer, document viewer, query history
 │   └── requirements.txt
 │
 ├── data/
@@ -863,7 +863,8 @@ single round-trip regardless of document size.
 
 - **HyDE adds latency per search.** Each `search` tool call includes one small LLM
   inference (~3–5 s on GPU). For multi-hop questions that call `search` twice, this
-  doubles the HyDE overhead. Set `HYDE_ENABLED=false` if latency is critical.
+  doubles the HyDE overhead. HyDE is disabled by default; set `HYDE_ENABLED=true` to
+  enable.
 
 - **`participants_json LIKE` is a full table scan.** Participant filtering uses a
   `LIKE %substring%` pattern with no index. For large corpora or frequent participant
