@@ -8,7 +8,7 @@ from openai import OpenAI
 import db
 from config import (
     OLLAMA_HOST, LLM_MODEL,
-    MAX_AGENT_TURNS, MAX_HISTORY_TURNS, MAX_NEW_TOKENS, TEMPERATURE,
+    MAX_AGENT_TURNS, MAX_HISTORY_TURNS, MAX_NEW_TOKENS, NUM_CTX, TEMPERATURE,
 )
 from prompt import SYSTEM_PROMPT, TOOLS
 from tools import execute_tool
@@ -110,7 +110,7 @@ def run_agent(
             tool_choice="auto",
             max_tokens=MAX_NEW_TOKENS,
             temperature=TEMPERATURE,
-            extra_body={"options": {"num_ctx": 12288, **({"think": True} if thinking_mode else {})}},
+            extra_body={"options": {"num_ctx": NUM_CTX, **({"think": True} if thinking_mode else {})}},
         )
         msg = resp.choices[0].message
         raw_content = msg.content or ""
@@ -202,7 +202,7 @@ def run_agent_streaming(
             stream=True,
             max_tokens=MAX_NEW_TOKENS,
             temperature=TEMPERATURE,
-            extra_body={"options": {"num_ctx": 12288, **({"think": True} if thinking_mode else {})}},
+            extra_body={"options": {"num_ctx": NUM_CTX, **({"think": True} if thinking_mode else {})}},
         )
 
         content_acc: list[str] = []

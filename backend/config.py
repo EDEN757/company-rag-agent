@@ -24,6 +24,7 @@ BM25_B            = 0.75
 MAX_AGENT_TURNS   = 6
 MAX_HISTORY_TURNS = 5
 MAX_NEW_TOKENS    = 1000
+NUM_CTX           = int(os.environ.get("NUM_CTX", "8192"))
 TEMPERATURE       = 0.1
 MAX_EMBED_CHARS   = 6000
 TABLE_DOCS        = "rag_documents"
