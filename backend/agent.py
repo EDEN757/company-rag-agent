@@ -102,12 +102,12 @@ def run_agent(
     thinking_steps: list[str] = []
     selected_tools = _select_tools(question)
 
-    for _ in range(MAX_AGENT_TURNS):
+    for turn in range(MAX_AGENT_TURNS):
         resp = _client.chat.completions.create(
             model=LLM_MODEL,
             messages=messages,
             tools=selected_tools,
-            tool_choice="auto",
+            tool_choice="required" if turn == 0 else "auto",
             max_tokens=MAX_NEW_TOKENS,
             temperature=TEMPERATURE,
             extra_body={"options": {"num_ctx": NUM_CTX, **({"think": True} if thinking_mode else {})}},
@@ -198,7 +198,7 @@ def run_agent_streaming(
             model=LLM_MODEL,
             messages=messages,
             tools=selected_tools,
-            tool_choice="auto",
+            tool_choice="required" if _turn == 0 else "auto",
             stream=True,
             max_tokens=MAX_NEW_TOKENS,
             temperature=TEMPERATURE,
