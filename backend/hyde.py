@@ -1,5 +1,6 @@
 import concurrent.futures
 import logging
+import re
 import numpy as np
 from openai import OpenAI
 from embed import embed
@@ -42,8 +43,12 @@ def hyde_embed(query: str) -> list[float]:
             temperature=0.7,
             extra_body={"options": {"num_ctx": 512, "think": False}},
         )
-        hypothetical = resp.choices[0].message.content.strip()
+        raw = resp.choices[0].message.content or ""
+        hypothetical = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         log.debug(f"HyDE hypothetical: {hypothetical[:120]}")
+        if not hypothetical:
+            log.warning("HyDE: empty hypothetical (model only emitted think tokens) — using raw query embedding.")
+            return q_future.result(timeout=30.0)
 
         h_vec = np.array(embed(hypothetical), dtype=np.float32)
         q_vec = np.array(q_future.result(timeout=30.0), dtype=np.float32)

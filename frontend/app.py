@@ -17,10 +17,8 @@ Environment variables (set in ~/.bashrc on the Frontend app):
 """
 
 import html
-import json as _json
 import os
 import re
-import threading
 import urllib.parse
 
 import requests
@@ -34,12 +32,6 @@ BACKEND_URL = os.environ.get("BACKEND_URL", "http://nv-service-e4bb2876d3e69f18f
 MAX_QUERY_HISTORY = 5
 DOC_ID_RE    = re.compile(r'\b(dsid_[a-f0-9]+)\b')
 _HTML_TAG_RE = re.compile(r'<[^>]+>')
-
-_cancel_event = threading.Event()
-
-# Shared state so JavaScript can poll live trace progress
-_trace_lock  = threading.Lock()
-_trace_state: dict = {"traces": [], "current": "", "running": False}
 
 CSS = """
 .thinking-panel,
@@ -155,7 +147,7 @@ def _add_loading(question: str, history: list[dict]) -> list[dict]:
     return history + [{"role": "user", "content": question}]
 
 
-# ── Chat handler (streaming SSE from /query/stream) ────────────────────────────
+# ── Chat handler ───────────────────────────────────────────────────────────────
 def chat(
     question: str,
     history_with_loading: list[dict],
@@ -168,125 +160,60 @@ def chat(
         return
 
     actual_history = history_with_loading[:-1] if history_with_loading else []
-    _cancel_event.clear()
-    with _trace_lock:
-        _trace_state.update({"traces": [], "current": "", "running": True})
 
-    thinking_md  = ("*Reasoning mode is on — waiting for model…*" if enable_thinking
-                    else "*Reasoning mode is off — enable the toggle to activate model thinking.*")
-    traces: list[str] = []
-    current_trace = ""   # label of the tool currently running
-    traces_md    = ""
-    current_ans  = ""
-    all_sources: list[dict] = []
-    latency_ms   = 0.0
+    thinking_md = ("*Reasoning mode is on — thinking…*" if enable_thinking
+                   else "*Reasoning mode is off — enable the toggle to activate model thinking.*")
 
-    def _h(answer_so_far: str = "") -> list[dict]:
-        h = actual_history + [{"role": "user", "content": question}]
-        if answer_so_far:
-            h = h + [{"role": "assistant", "content": answer_so_far}]
-        return h
-
-    def _cur_traces_md(running_label: str = "") -> str:
-        items = [f"- `{t}`" for t in traces]
-        if running_label:
-            items.append(f"- `{running_label}` ⏳")
-        return ("**Agent steps:**\n\n" + "\n".join(items)) if items else ""
+    # Show "..." immediately while the backend processes
+    yield (
+        history_with_loading + [{"role": "assistant", "content": "…"}],
+        thinking_md, "", query_history, _render_history(query_history),
+    )
 
     try:
-        with requests.post(
-            f"{BACKEND_URL}/query/stream",
+        r = requests.post(
+            f"{BACKEND_URL}/query",
             json={"question": question, "history": _api_history(actual_history),
                   "thinking_mode": enable_thinking},
-            stream=True,
             timeout=300,
-        ) as resp:
-            resp.raise_for_status()
-
-            for raw in resp.iter_lines():
-                if _cancel_event.is_set():
-                    with _trace_lock:
-                        _trace_state["running"] = False
-                    yield _h("⚠️ Search interrupted by user."), thinking_md, traces_md, query_history, _render_history(query_history)
-                    return
-
-                line = raw.decode() if isinstance(raw, bytes) else raw
-                if not line.startswith("data: "):
-                    continue
-                data = line[6:]
-                if data == "[DONE]":
-                    break
-                try:
-                    ev = _json.loads(data)
-                except Exception:
-                    continue
-
-                etype = ev.get("type")
-
-                if etype == "trace_start":
-                    current_trace = ev["label"]
-                    with _trace_lock:
-                        _trace_state["current"] = current_trace
-                    traces_md = _cur_traces_md(current_trace)
-                    yield _h(current_ans), thinking_md, traces_md, query_history, _render_history(query_history)
-
-                elif etype == "trace_done":
-                    traces.append(ev["content"])
-                    current_trace = ""
-                    with _trace_lock:
-                        _trace_state["traces"] = traces.copy()
-                        _trace_state["current"] = ""
-                    traces_md = _cur_traces_md()
-                    yield _h(current_ans), thinking_md, traces_md, query_history, _render_history(query_history)
-
-                elif etype == "token":
-                    current_ans += ev["content"]
-                    yield _h(current_ans), thinking_md, traces_md, query_history, _render_history(query_history)
-
-                elif etype == "retract":
-                    current_ans = ""
-                    yield _h(), thinking_md, traces_md, query_history, _render_history(query_history)
-
-                elif etype == "answer":
-                    current_ans = _linkify(ev["content"], question)
-                    yield _h(current_ans), thinking_md, traces_md, query_history, _render_history(query_history)
-
-                elif etype == "thinking":
-                    thinking_md = f"**Model reasoning:**\n\n{ev['content']}"
-
-                elif etype == "done":
-                    latency_ms  = ev.get("latency_ms", 0)
-                    all_sources = ev.get("sources", [])
-                    with _trace_lock:
-                        _trace_state["running"] = False
-                    if traces_md:
-                        traces_md = traces_md.replace(
-                            "**Agent steps:**",
-                            f"**Agent steps** &nbsp;*(completed in {latency_ms:.0f} ms)*",
-                        )
-
+        )
+        r.raise_for_status()
+        data = r.json()
     except requests.exceptions.ConnectionError:
-        with _trace_lock:
-            _trace_state["running"] = False
-        yield _h("Cannot reach the backend. Make sure the Backend app is running."), thinking_md, "", query_history, _render_history(query_history)
+        h = actual_history + [{"role": "user", "content": question},
+                               {"role": "assistant", "content": "Cannot reach the backend. Make sure the Backend app is running."}]
+        yield h, thinking_md, "", query_history, _render_history(query_history)
         return
     except requests.exceptions.Timeout:
-        with _trace_lock:
-            _trace_state["running"] = False
-        yield _h("Backend timed out (>300 s)."), thinking_md, traces_md, query_history, _render_history(query_history)
+        h = actual_history + [{"role": "user", "content": question},
+                               {"role": "assistant", "content": "Backend timed out (>300 s)."}]
+        yield h, thinking_md, "", query_history, _render_history(query_history)
         return
     except Exception as e:
-        with _trace_lock:
-            _trace_state["running"] = False
-        yield _h(f"Error: {e}"), thinking_md, traces_md, query_history, _render_history(query_history)
+        h = actual_history + [{"role": "user", "content": question},
+                               {"role": "assistant", "content": f"Error: {e}"}]
+        yield h, thinking_md, "", query_history, _render_history(query_history)
         return
 
-    # Apply doc-ID links to streamed answer (tokens arrive without HTML)
-    if current_ans and '<a href="doc/' not in current_ans:
-        current_ans = _linkify(current_ans, question)
+    answer       = _linkify(data.get("answer", ""), question)
+    traces       = data.get("tool_traces", [])
+    all_sources  = data.get("sources", [])
+    latency_ms   = data.get("latency_ms", 0)
+    thinking_steps = data.get("thinking_steps", [])
 
-    if enable_thinking and "**Model reasoning:**" not in thinking_md:
+    traces_md = ""
+    if traces:
+        traces_md = (
+            f"**Agent steps** &nbsp;*(completed in {latency_ms:.0f} ms)*\n\n"
+            + "\n".join(f"- `{t}`" for t in traces)
+        )
+
+    if enable_thinking and thinking_steps:
+        thinking_md = f"**Model reasoning:**\n\n{thinking_steps[-1]}"
+    elif enable_thinking:
         thinking_md = "*Reasoning mode is on but the model did not emit any reasoning.*"
+    else:
+        thinking_md = "*Reasoning mode is off — enable the toggle to activate model thinking.*"
 
     sources_md = _build_sources_md(question, all_sources)
     new_qhist  = ([{"question": question, "traces_md": traces_md, "sources_md": sources_md}]
@@ -298,26 +225,15 @@ def chat(
     if show_sources:
         parts.append(sources_md)
 
-    yield (
-        _h(current_ans),
-        thinking_md,
-        "\n\n---\n\n".join(parts),
-        new_qhist,
-        _render_history(new_qhist),
-    )
-
-
-def _do_cancel():
-    _cancel_event.set()
-    with _trace_lock:
-        _trace_state["running"] = False
+    h = actual_history + [{"role": "user", "content": question},
+                           {"role": "assistant", "content": answer}]
+    yield h, thinking_md, "\n\n---\n\n".join(parts), new_qhist, _render_history(new_qhist)
 
 
 # ── Gradio UI ──────────────────────────────────────────────────────────────────
 _LINK_FIX_JS = """
 <script defer>
 (function() {
-  // ── Open all chatbot links in a new tab ──────────────────────────────────
   const fixLinks = node => {
     if (node.nodeType !== 1) return;
     node.querySelectorAll && node.querySelectorAll('a[href]').forEach(a => {
@@ -327,83 +243,6 @@ _LINK_FIX_JS = """
   };
   new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(fixLinks)))
     .observe(document.body, { childList: true, subtree: true });
-
-  // ── Live agent-step polling (bypasses proxy WebSocket buffering) ──────────
-  let _poll = null;
-
-  function esc(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
-
-  function getPanel() {
-    // .prose is only rendered when Markdown has content; fall back to wrapper,
-    // then create an overlay div if neither exists yet (e.g. very first load).
-    return (
-      document.querySelector('.results-panel .prose') ||
-      document.querySelector('.results-panel') ||
-      (function() {
-        let el = document.getElementById('_agent_traces');
-        if (!el) {
-          el = document.createElement('div');
-          el.id = '_agent_traces';
-          el.style.cssText = 'position:fixed;top:70px;right:24px;max-width:380px;' +
-            'background:#1e1e2e;border:1px solid #555;border-radius:10px;' +
-            'padding:12px 16px;z-index:9999;font-size:12px;color:#ccc;' +
-            'box-shadow:0 4px 16px rgba(0,0,0,.5);line-height:1.5';
-          document.body.appendChild(el);
-        }
-        return el;
-      })()
-    );
-  }
-
-  function renderTraces(d) {
-    const el = getPanel();
-    if (!el) return;
-    if (!d.traces.length && !d.current) {
-      if (d.running) el.innerHTML = '<em style="color:#888">Searching…</em>';
-      return;
-    }
-    let html = '<strong>Agent steps:</strong><ul style="margin:6px 0 0 18px;padding:0;list-style:disc">';
-    d.traces.forEach(t => { html += '<li><code>' + esc(t) + '</code></li>'; });
-    if (d.current) html += '<li><code>' + esc(d.current) + '</code> ⏳</li>';
-    html += '</ul>';
-    el.innerHTML = html;
-  }
-
-  function startPoll() {
-    stopPoll();
-    let _pollStarted = false;
-    const el = getPanel();
-    if (el) el.innerHTML = '<em style="color:#888">Searching…</em>';
-    _poll = setInterval(async () => {
-      try {
-        const r = await fetch('api/traces');
-        if (!r.ok) return;
-        const d = await r.json();
-        if (d.running) _pollStarted = true;
-        renderTraces(d);
-        if (_pollStarted && !d.running) stopPoll();
-      } catch(e) {}
-    }, 600);
-  }
-
-  function stopPoll() {
-    if (_poll) { clearInterval(_poll); _poll = null; }
-  }
-
-  // Start polling on Send button click or Enter in the input
-  // (lines=1 renders <input>, not <textarea>, so check both)
-  document.addEventListener('click', e => {
-    const btn = e.target.closest('button');
-    if (btn && /^send$/i.test(btn.textContent.trim())) startPoll();
-  });
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      const tag = document.activeElement && document.activeElement.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') startPoll();
-    }
-  });
 })();
 </script>
 """
@@ -470,8 +309,6 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS, head=_LINK_FIX_JS) 
                 refresh_btn = gr.Button("Refresh")
 
     # ── Event wiring ───────────────────────────────────────────────────────────
-    # Two-step: sync _add_loading renders immediately (bypasses proxy buffering),
-    # then the generator chat() runs the backend call.
     _load_btn = submit_btn.click(
         fn=_add_loading, inputs=[msg_box, chatbot], outputs=[chatbot],
     )
@@ -492,7 +329,7 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS, head=_LINK_FIX_JS) 
     )
     _msg_event.then(fn=lambda: "", outputs=msg_box)
 
-    stop_btn.click(fn=_do_cancel, cancels=[_submit_event, _msg_event])
+    stop_btn.click(fn=None, cancels=[_submit_event, _msg_event])
 
     clear_btn.click(
         fn=lambda: ([], "*Reasoning mode is off — enable the toggle to activate model thinking.*",
@@ -509,16 +346,6 @@ with gr.Blocks(title="Company Knowledge Assistant", css=CSS, head=_LINK_FIX_JS) 
 # ── Document viewer ────────────────────────────────────────────────────────────
 fastapi_app = FastAPI()
 
-
-@fastapi_app.get("/api/traces")
-def api_traces():
-    """Polled by JavaScript to show live agent steps while Gradio generator is blocked by proxy."""
-    with _trace_lock:
-        return dict(_trace_state)
-
-# Highlight query terms that actually appear in the document, ranked by TF.
-# This shows WHICH words drove the BM25 score (terms the model actually matched),
-# not just all words from the query regardless of whether they appear.
 _HIGHLIGHT_JS = """
 <script>
 (function() {
@@ -527,12 +354,9 @@ _HIGHLIGHT_JS = """
   const pre = document.querySelector('pre');
   if (!pre) return;
 
-  // Tokenize query into words > 3 chars
   const queryTerms = (q.toLowerCase().match(/[a-zA-Z]\\w*/g) || []).filter(w => w.length > 3);
   if (!queryTerms.length) return;
 
-  // Score each query term by term-frequency in the document (TF component of BM25).
-  // A term that appears often in this document contributed more to its retrieval score.
   const docText  = pre.textContent.toLowerCase();
   const docWords = (docText.match(/[a-zA-Z]\\w*/g) || []);
   const docLen   = docWords.length || 1;
