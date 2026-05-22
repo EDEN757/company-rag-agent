@@ -89,11 +89,11 @@ def _api_history(history: list[dict]) -> list[dict]:
 
 
 def _linkify(text: str, question: str) -> str:
-    """Make doc IDs in text clickable."""
+    """Make doc IDs in text clickable using Markdown links (Gradio escapes raw HTML)."""
     q_enc = urllib.parse.quote(question, safe="")
     def _link(m):
-        eid = html.escape(m.group(1))
-        return f'<a href="doc/{eid}?q={q_enc}" target="_blank" rel="noopener"><code>{eid}</code></a>'
+        eid = m.group(1)
+        return f'[`{eid}`](doc/{eid}?q={q_enc})'
     return DOC_ID_RE.sub(_link, text)
 
 
@@ -102,8 +102,7 @@ def _build_sources_md(question: str, sources: list[dict]) -> str:
         return "*No sources retrieved for this query.*"
     q_enc = urllib.parse.quote(question, safe="")
     def _doc_link(doc_id: str) -> str:
-        eid = html.escape(doc_id)
-        return f'<a href="doc/{eid}?q={q_enc}" target="_blank" rel="noopener"><code>{eid}</code></a>'
+        return f'[`{doc_id}`](doc/{doc_id}?q={q_enc})'
     opened = [s for s in sources if s.get("opened")]
     found  = [s for s in sources if not s.get("opened")]
     lines: list[str] = []

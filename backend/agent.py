@@ -91,11 +91,13 @@ def run_agent(
     history: list[dict],
     thinking_mode: bool = False,
 ) -> tuple[str, list[dict], list[str], list[str]]:
-    system_content = "/think\n\n" + SYSTEM_PROMPT if thinking_mode else "/no_think\n\n" + SYSTEM_PROMPT
-    messages: list[dict] = [{"role": "system", "content": system_content}]
+    # /think and /no_think must be at the start of the user message to reliably
+    # control Qwen3 thinking mode; placing them only in the system prompt is ignored.
+    think_prefix = "/think\n\n" if thinking_mode else "/no_think\n\n"
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
     for h in history[-(MAX_HISTORY_TURNS * 2):]:
         messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": question})
+    messages.append({"role": "user", "content": think_prefix + question})
 
     all_sources: list[dict] = []
     traces: list[str] = []
@@ -183,11 +185,11 @@ def run_agent_streaming(
       done         {"type": "done", "sources": list, "latency_ms": float}
     """
     t0 = time.time()
-    system_content = "/think\n\n" + SYSTEM_PROMPT if thinking_mode else "/no_think\n\n" + SYSTEM_PROMPT
-    messages: list[dict] = [{"role": "system", "content": system_content}]
+    think_prefix = "/think\n\n" if thinking_mode else "/no_think\n\n"
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
     for h in history[-(MAX_HISTORY_TURNS * 2):]:
         messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": question})
+    messages.append({"role": "user", "content": think_prefix + question})
 
     all_sources: list[dict] = []
     traces: list[str] = []
