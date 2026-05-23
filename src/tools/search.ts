@@ -71,11 +71,14 @@ export const searchTool: AgentTool = {
         details: { hits: 0 },
       };
     }
+    // The LLM-facing text deliberately omits chunk_id: it's an internal identifier
+    // and small models tend to confabulate it back as a citable doc_id. The
+    // structured `details` payload below still includes chunk_id for the frontend.
     const lines: string[] = [];
     for (const h of hits) {
       const time = h.ts_from ? ` [${h.ts_from}${h.ts_to && h.ts_to !== h.ts_from ? ` → ${h.ts_to}` : ""}]` : "";
       lines.push(
-        `#${h.chunk_id} (doc=${h.doc_id}, source=${h.source_type}${time}, score=${h.score} vec=${h.vec_score} kw=${h.kw_score})\n` +
+        `doc=${h.doc_id}  source=${h.source_type}${time}  score=${h.score} (vec=${h.vec_score} kw=${h.kw_score})\n` +
           `title: ${h.title ?? ""}\n` +
           `preview: ${h.preview}`,
       );
