@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "tsx src/main.ts"
+    "start": "tsx src/main.ts",
+    "server": "tsx src/server/index.ts"
   },
   "dependencies": {
     "@mariozechner/pi-agent-core": "latest",

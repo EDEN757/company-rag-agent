@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Company RAG agent</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Company RAG agent</h1>
+      <button id="reset-btn" type="button" title="Clear the conversation">Reset</button>
+    </header>
+
+    <section class="skills" aria-label="Skills">
+      <div id="skills-list" class="skills-list"></div>
+    </section>
+
+    <section class="transcript" id="transcript" aria-live="polite"></section>
+
+    <footer class="composer">
+      <div id="active-skill-badge" class="active-skill hidden">
+        <span>Skill active: <strong id="active-skill-name"></strong></span>
+        <button type="button" id="clear-skill" aria-label="Clear active skill">×</button>
+      </div>
+      <form id="composer-form">
+        <textarea
+          id="composer-input"
+          rows="2"
+          placeholder="Ask something — or click a skill above to start."
+        ></textarea>
+        <button type="submit" id="send-btn">Send</button>
+      </form>
+    </footer>
+
+    <div id="doc-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close="1"></div>
+      <div class="modal-panel">
+        <header>
+          <span id="doc-modal-id" class="doc-id"></span>
+          <button type="button" class="modal-close" data-close="1" aria-label="Close">×</button>
+        </header>
+        <div class="modal-meta" id="doc-modal-meta"></div>
+        <pre id="doc-modal-body" class="modal-body"></pre>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

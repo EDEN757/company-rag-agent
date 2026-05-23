@@ -76,8 +76,8 @@ def search(
     order = np.argsort(-sims)[:TOP_K_PER_BRANCH]
     vec_scores: dict[int, float] = {}
     for idx in order:
-        cosine_dist = 1 - float(sims[idx])
-        vec_scores[int(ids[idx])] = (1 - cosine_dist) * SCALE
+        # sims is cosine similarity in [-1, 1]; scale to match the kw branch.
+        vec_scores[int(ids[idx])] = float(sims[idx]) * SCALE
 
     rows = con.execute(
         "SELECT c.chunk_id FROM chunks_fts f JOIN chunks c ON c.chunk_id = f.rowid "

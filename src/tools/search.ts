@@ -19,13 +19,13 @@ export const searchTool: AgentTool = {
     date_from: Type.Optional(
       Type.String({
         description:
-          "Optional ISO-8601 date/datetime lower bound. Only chunks whose ts_to is null or >= date_from are considered (mostly meaningful for gmail).",
+          "Optional ISO-8601 date/datetime lower bound. NOTE: only gmail chunks are time-stamped; other sources (slack, confluence, jira, linear, hubspot, github, fireflies, google_drive) pass through this filter unchanged. Use this when the user explicitly asks about emails in a date range. See docs/date-filter.md.",
       }),
     ),
     date_to: Type.Optional(
       Type.String({
         description:
-          "Optional ISO-8601 date/datetime upper bound (mostly meaningful for gmail).",
+          "Optional ISO-8601 date/datetime upper bound. Same caveat as date_from — effectively gmail-only. See docs/date-filter.md.",
       }),
     ),
     participant: Type.Optional(

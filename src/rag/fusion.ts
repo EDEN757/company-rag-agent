@@ -124,8 +124,9 @@ export async function search(query: string, filters: SearchFilters = {}, topN = 
   for (let i = 0; i < Math.min(TOP_K_PER_BRANCH, order.length); i++) {
     const idx = order[i];
     if (!isFinite(sims[idx])) break;
-    const cosineDistance = 1 - sims[idx];
-    vecScores.set(chunkIds[idx], (1 - cosineDistance) * SCORE_SCALE);
+    // sims is cosine similarity in [-1, 1] (L2-normalized vectors → dot product).
+    // Scale to put it on the same magnitude as the kw branch ((1/(1+rank))*SCALE).
+    vecScores.set(chunkIds[idx], sims[idx] * SCORE_SCALE);
   }
 
   // --- Fusion ---
