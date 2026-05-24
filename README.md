@@ -132,6 +132,39 @@ A TUI opens. Ask anything. The agent calls `search`, optionally
 If the reranker is not running the agent degrades gracefully — search
 still works, results are ordered by hybrid fusion score instead.
 
+#### Running on Nuvolos
+
+Node, npm, and Ollama live under `/files/bin` and models are on a shared
+mount — run this block once per session before starting anything:
+
+```bash
+# 1. Expose node/npm/ollama binaries and point Ollama at the shared model store
+export PATH="/files/bin:$PATH"
+export OLLAMA_MODELS=/space_mounts/pars/ollama_models
+export OLLAMA_FLASH_ATTENTION=1
+
+# 2. Start Ollama in the background if it isn't already running
+pgrep -f "ollama serve" >/dev/null || nohup ollama serve > /tmp/ollama.log 2>&1 &
+sleep 3
+ollama list   # should show qwen3:8b and nomic-embed-text
+
+# 3. Move into the project and load env vars
+cd /files/company-rag-agent
+set -a; source .env; set +a
+
+# 4. Sanity-check
+which npm && npm --version
+echo "DB: $RAG_DB_PATH"
+ls -la "$RAG_DB_PATH" | head -1   # should show ~344 MB
+
+# 5. Start the reranker (separate terminal or background)
+source data/.venv/bin/activate
+python -m uvicorn indexing.reranker:app --port 8001 &
+
+# 6. Start the agent
+npm run server
+```
+
 ### Run the retrieval eval
 
 ```bash
