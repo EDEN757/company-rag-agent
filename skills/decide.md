@@ -8,7 +8,8 @@ suggested_question: What did we decide about the gocritic paramTypeCombine linte
 
 Workflow for the user's question:
 
-1. Call `search` for the topic.
+1. Call `search` for the topic with top_n=6. Do NOT add any source_types filter —
+   decisions can live in any source (Slack, Jira, Confluence, Fireflies, etc.).
 2. You MUST call `open_document` on the top 2 or 3 results. Do not skip this step.
    Do not answer from the search preview alone — always read the full document first.
 3. Identify the most recent statement that uses decision language. Examples to look for:
