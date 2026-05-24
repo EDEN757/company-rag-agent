@@ -75,13 +75,13 @@ by topic.
 ```bash
 # Pull the open-source models.
 ollama pull nomic-embed-text          # 274 MB, 137M params, 768-dim, 8192-context
-ollama pull qwen2.5:9b                # 6.6 GB — adjust src/model.ts if you prefer
-                                      # a different small open model
+ollama pull qwen3:8b                  # 5.2 GB — the model used on Nuvolos
+                                      # change via LLM_MODEL env var if you prefer another
 
 # Python deps (the data/.venv is gitignored — make your own).
 python -m venv data/.venv
 source data/.venv/bin/activate
-pip install pyarrow numpy httpx pandas
+pip install pyarrow numpy httpx pandas sentence-transformers fastapi uvicorn
 
 # Node deps.
 npm install
@@ -113,12 +113,24 @@ followed by related invoice-spike threads from different companies.
 
 ### Run the agent
 
+Two processes are needed: the reranker service and the agent itself.
+
 ```bash
+# Terminal 1 — cross-encoder reranker (keep this running)
+source data/.venv/bin/activate
+python -m uvicorn indexing.reranker:app --port 8001
+# First run downloads cross-encoder/ms-marco-MiniLM-L-6-v2 (~85 MB).
+# Subsequent runs start in < 5 s.
+
+# Terminal 2 — the agent
 npm start
 ```
 
 A TUI opens. Ask anything. The agent calls `search`, optionally
 `open_document`, and cites the `doc_id`. Type `/quit` to exit.
+
+If the reranker is not running the agent degrades gracefully — search
+still works, results are ordered by hybrid fusion score instead.
 
 ### Run the retrieval eval
 
@@ -159,7 +171,15 @@ See [Evaluation](#evaluation) for what to expect.
                   │                  │ Ollama /api/embeddings │
                   │                  │ (nomic-embed-text)    │
                   └─────────┬────────┘                       │
-                            │ weighted fusion                │
+                            │ weighted fusion (≤16 candidates)│
+                            ▼                                │
+              ┌─────────────────────────────┐               │
+              │  cross-encoder reranker      │               │
+              │  indexing/reranker.py        │               │
+              │  ms-marco-MiniLM-L-6-v2      │               │
+              │  HTTP POST :8001/rerank      │               │
+              └─────────────┬───────────────┘               │
+                            │ top-N reranked                │
                             ▼                                ▼
                      ┌─────────────────────────────────────────────────┐
                      │            data/index/rag.db (SQLite)            │
@@ -256,14 +276,29 @@ questions), but dense embeddings handle paraphrasing. The vector branch
 generally wins on this dataset, so it carries more weight, while BM25 acts
 as a precision booster for term-heavy queries.
 
-### 5. Threshold + top-N
+### 5. Threshold + candidate pool
 
-Anything below `final ≥ 0.35` is dropped to keep the agent from seeing
-weak hits. Top N (default 6) is returned with `chunk_id`, `doc_id`,
-`source_type`, `title`, `score`, `vec_score`, `kw_score`, and a
-~300-char `preview`.
+Anything below `final ≥ 0.35` is dropped. The surviving candidates
+(at most 16: 2 branches × 8 each) are passed to the cross-encoder.
 
-### 6. Optional structured pre-filter
+### 6. Cross-encoder reranking (course pillar W9)
+
+The full candidate pool (≤ 16 chunks) is sent to a local Python
+service (`indexing/reranker.py`) running `cross-encoder/ms-marco-MiniLM-L-6-v2`
+(22 M params, CPU-pinned). Unlike the bi-encoder, which embeds query and
+chunk independently, the cross-encoder reads `(query, chunk_text)` as a
+single input and scores their interaction directly — catching relevance
+signals the dot-product step misses (negation, context, paraphrasing).
+
+The reranker runs in ~150–250 ms on CPU, negligible against the LLM
+generation time. After reranking, results are **deduplicated by `doc_id`**
+so the agent always sees up to N distinct documents rather than multiple
+chunks from the same source. Top N (default 6) is returned in reranker
+order with `doc_id`, `source_type`, `title`, `score`, `vec_score`,
+`kw_score`, and a ~300-char `preview`. If the service is unreachable the
+pipeline falls back to fusion order silently.
+
+### 7. Optional structured pre-filter
 
 When the user is explicit about who, when, or where, the agent can pass
 filters on the `search` tool:
@@ -432,11 +467,25 @@ re-chunked with the deterministic parser):
 
 ## Evaluation
 
-`indexing/eval_retrieval.py` re-implements the exact fusion math used by
-the TS tool (so tuning weights in one place is mirrored in the other) and
-computes Recall@k, MRR@k, and nDCG@k against `expected_doc_ids`.
+`indexing/eval_retrieval.py` re-implements the exact fusion + reranking
+pipeline used by the TS tool and computes Recall@k, MRR@k, and nDCG@k
+against `expected_doc_ids`.
 
-On the first 100 questions of the gold set (baseline, no reranking):
+Run without `--rerank` for the fusion-only baseline, or with `--rerank`
+(requires the reranker service running) to measure the full live pipeline:
+
+```bash
+# Fusion only
+python indexing/eval_retrieval.py --db data/index/rag.db \
+    --questions data/raw/questions_test.parquet --top-k 10
+
+# Full pipeline (fusion + cross-encoder)
+python indexing/eval_retrieval.py --db data/index/rag.db \
+    --questions data/raw/questions_test.parquet --top-k 10 --rerank
+```
+
+On the first 100 questions of the gold set — **fusion only, pre-reranker
+baseline:**
 
 | k | Recall | MRR | nDCG |
 |---|--------|------|------|
@@ -445,9 +494,10 @@ On the first 100 questions of the gold set (baseline, no reranking):
 | 5 | 0.740 | 0.696 | 0.707 |
 | 10 | **0.930** | 0.720 | 0.767 |
 
-Recall@10 of 0.93 means the right document is in the agent's working set
-on 93 % of queries — a strong baseline before adding the cross-encoder
-reranker (course pillar W9, planned next).
+Recall@10 of 0.93 means the right document is in the agent's candidate
+pool on 93 % of queries. The cross-encoder reranker is expected to push
+Recall@1 substantially above 0.67; run with `--rerank` to get current
+numbers.
 
 Two questions we sanity-checked end-to-end through the live agent:
 
@@ -456,6 +506,51 @@ Two questions we sanity-checked end-to-end through the live agent:
   search, hit all 5 gold facts, cited the `doc_id` verbatim.
 - **qst_0153** (Slack, "what did they change in the linter config…"):
   agent returned the gold doc, hit both gold facts.
+
+### End-to-end accuracy eval (`eval_e2e.py`)
+
+`indexing/eval_e2e.py` runs the **full pipeline** — retrieval → LLM answer
+generation → fact scoring — against a sample of gold questions. It uses the
+**same LLM model as the live agent** via the `LLM_MODEL` environment variable
+(on Nuvolos: `qwen3:8b`). No separate model or service is involved — the eval
+and the agent always measure the same thing.
+
+The script automatically filters to questions whose answer documents are
+present in the 10k-doc subset (roughly half the 500-question gold set),
+then samples N of those for evaluation.
+
+```bash
+# Requires: Ollama running with the LLM model, and the index built.
+# Optional: start the reranker service before passing --rerank.
+
+# On Nuvolos (qwen3:8b, thinking disabled):
+LLM_MODEL=qwen3:8b LLM_DISABLE_THINKING=1 \
+python indexing/eval_e2e.py \
+    --db        data/index/rag.db \
+    --questions data/raw/questions_test.parquet \
+    --n         25
+
+# With cross-encoder reranking:
+LLM_MODEL=qwen3:8b LLM_DISABLE_THINKING=1 \
+python indexing/eval_e2e.py \
+    --db        data/index/rag.db \
+    --questions data/raw/questions_test.parquet \
+    --n         25 \
+    --rerank
+```
+
+Three metrics are reported:
+
+| metric | what it measures |
+|---|---|
+| **Retrieval Hit@1** | The correct document was ranked #1 — the LLM had the best possible context |
+| **Retrieval Hit@6** | The correct document was somewhere in the top 6 — retrieval succeeded but may have ranked it low |
+| **Avg Fact Recall** | Fraction of gold `answer_facts` that appear in the LLM's response — the true end-to-end accuracy |
+
+A `~` in the per-question output means the right document was retrieved but
+not ranked first; the LLM answered from the wrong top document. A `✗` means
+retrieval missed entirely. This lets you distinguish retrieval failures from
+LLM failures.
 
 ---
 
@@ -536,7 +631,7 @@ repo:
 | Production engineering | W9 | Resumable indexer, retries, payload-shrinking on 500s, ANALYZE/optimize | `indexing/build_index.py`, `indexing/embed.py` |
 | IR evaluation | W1, W2 | Recall@k, MRR@k, nDCG@k for k ∈ {1, 3, 5, 10} | `indexing/eval_retrieval.py` |
 | Frontend (W10) | W10 | pi-tui TUI with visible tool-call traces and citations | `src/main.ts` |
-| Re-ranking | W9 | *Not yet implemented* — next step (cross-encoder) | — |
+| Re-ranking | W9 | Cross-encoder rerank over ≤16 fused candidates (ms-marco-MiniLM-L-6-v2, CPU) | `indexing/reranker.py`, `src/rag/rerank.ts`, `src/rag/fusion.ts` |
 
 ---
 
@@ -577,7 +672,8 @@ repo:
     ├── rag/
     │   ├── db.ts              better-sqlite3 read-only + Float32Array vectors
     │   ├── embed.ts           Ollama /api/embeddings client (L2-normalized)
-    │   ├── fusion.ts          hybrid search: BM25 + vector + weighted fusion
+    │   ├── fusion.ts          hybrid search: BM25 + vector + fusion + reranking + dedup
+    │   ├── rerank.ts          HTTP client for the Python cross-encoder service
     │   ├── smoke.ts           one-shot CLI search for development
     │   └── filter_smoke.ts    sanity tests for the structured filters
     └── tools/
@@ -594,9 +690,6 @@ repo:
 
 ## Known limitations and future work
 
-- **No re-ranking yet.** Recall@10 = 0.93 but Recall@1 = 0.67. A
-  cross-encoder rerank pass over the top 20 fused hits (course pillar W9)
-  is the obvious next step to lift Recall@1 closer to Recall@10.
 - **Slack chunks have no timestamps.** The source rows don't carry
   per-message dates, so `date_from`/`date_to` filters silently exclude
   Slack. If we get a date-stamped Slack dump later, the chunker just needs

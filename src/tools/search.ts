@@ -75,10 +75,11 @@ export const searchTool: AgentTool = {
     // and small models tend to confabulate it back as a citable doc_id. The
     // structured `details` payload below still includes chunk_id for the frontend.
     const lines: string[] = [];
-    for (const h of hits) {
+    for (let i = 0; i < hits.length; i++) {
+      const h = hits[i];
       const time = h.ts_from ? ` [${h.ts_from}${h.ts_to && h.ts_to !== h.ts_from ? ` → ${h.ts_to}` : ""}]` : "";
       lines.push(
-        `doc=${h.doc_id}  source=${h.source_type}${time}  score=${h.score} (vec=${h.vec_score} kw=${h.kw_score})\n` +
+        `[${i + 1}] doc=${h.doc_id}  source=${h.source_type}${time}\n` +
           `title: ${h.title ?? ""}\n` +
           `preview: ${h.preview}`,
       );

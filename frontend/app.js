@@ -157,10 +157,39 @@ function addToolStart(ts, ev) {
   $("#transcript").scrollTop = $("#transcript").scrollHeight;
 }
 
+function renderSearchResults(container, results) {
+  results.forEach((r, i) => {
+    const isReranked = r.rerank_score !== undefined && r.rerank_score !== null;
+    const scoreParts = [`vec ${r.vec_score}`, `kw ${r.kw_score}`];
+    if (isReranked) scoreParts.push(`reranker ${r.rerank_score.toFixed(2)}`);
+
+    const docId = el("button", { type: "button", class: "result-doc-id" }, r.doc_id);
+    docId.addEventListener("click", () => openDoc(r.doc_id));
+
+    container.appendChild(el("div", { class: "search-result" }, [
+      el("div", { class: "result-header" }, [
+        el("span", { class: "result-rank" }, `#${i + 1}`),
+        docId,
+        isReranked ? el("span", { class: "result-badge" }, "Reranked") : null,
+        el("span", { class: "result-source" }, r.source_type),
+      ]),
+      r.title ? el("div", { class: "result-title" }, r.title) : null,
+      el("div", { class: "result-scores" }, scoreParts.join(" · ")),
+      el("div", { class: "result-preview" }, r.preview || ""),
+    ]));
+  });
+}
+
 function addToolEnd(ts, ev) {
   const card = ts.toolCards.get(ev.id);
   if (card) {
-    card.resultEl.textContent = ev.summary || "(empty)";
+    if (ev.name === "search" && Array.isArray(ev.details?.results) && ev.details.results.length > 0) {
+      card.resultEl.className = "search-results";
+      clearChildren(card.resultEl);
+      renderSearchResults(card.resultEl, ev.details.results);
+    } else {
+      card.resultEl.textContent = ev.summary || "(empty)";
+    }
     if (ev.isError) card.details.classList.add("err");
   }
   collectDocIdsFromToolDetails(ts, ev);

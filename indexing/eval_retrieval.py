@@ -5,10 +5,18 @@ This is a Python re-implementation of the same fusion logic used by the
 TypeScript tool — keep them in lockstep when tuning weights.
 
 Usage:
+    # Fusion only (baseline):
     python indexing/eval_retrieval.py \
         --db        data/index/rag.db \
         --questions data/raw/questions_test.parquet \
         --top-k     10
+
+    # Fusion + cross-encoder reranker (requires reranker service running):
+    python indexing/eval_retrieval.py \
+        --db        data/index/rag.db \
+        --questions data/raw/questions_test.parquet \
+        --top-k     10 \
+        --rerank
 """
 
 from __future__ import annotations
@@ -16,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sqlite3
 import sys
@@ -31,17 +40,21 @@ sys.path.insert(0, str(HERE))
 from embed import DIM, embed_one  # noqa: E402
 import httpx  # noqa: E402
 
-TOP_K_PER_BRANCH = 8
+TOP_K_PER_BRANCH = 12
 KW_W = 0.3
 VEC_W = 0.7
 SCALE = 4
 THRESHOLD = 0.35
+RERANK_POOL = TOP_K_PER_BRANCH * 2  # mirrors fusion.ts: TOP_K_PER_BRANCH * 2
+
+RERANKER_URL = os.environ.get("RERANKER_URL", "http://127.0.0.1:8001")
 
 
 def fts_query(q: str) -> str:
-    words = [w for w in re.split(r"\s+", q.lower()) if len(w) > 1]
-    words = [re.sub(r"[^\w]", "", w) for w in words]
-    words = [w for w in words if w]
+    # Replace punctuation with spaces first, then split — mirrors fusion.ts ftsQuery
+    # so hyphenated terms like "INV-2026-11-331" expand to separate tokens rather
+    # than collapsing into one broken token.
+    words = [w for w in re.sub(r"[^\w\s]", " ", q.lower()).split() if len(w) > 1]
     if not words:
         return '""'
     return " OR ".join(f'"{w}"' for w in words)
@@ -62,6 +75,25 @@ def chunk_to_doc(con: sqlite3.Connection):
     return {r[0]: r[1] for r in con.execute("SELECT chunk_id, doc_id FROM chunks").fetchall()}
 
 
+def call_reranker(
+    reranker: httpx.Client, query: str, passages: list[str]
+) -> list[float] | None:
+    """POST to the cross-encoder service. Returns None on any failure."""
+    try:
+        r = reranker.post(
+            f"{RERANKER_URL}/rerank",
+            json={"query": query, "passages": passages},
+            timeout=8.0,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data.get("scores"), list):
+                return data["scores"]
+    except Exception:
+        pass
+    return None
+
+
 def search(
     con: sqlite3.Connection,
     client: httpx.Client,
@@ -70,6 +102,7 @@ def search(
     c2d: dict,
     query: str,
     top_n: int = 10,
+    reranker: httpx.Client | None = None,
 ):
     qvec = embed_one(client, query)
     sims = matrix @ qvec
@@ -97,8 +130,30 @@ def search(
         if final >= THRESHOLD:
             fused.append((cid, final))
     fused.sort(key=lambda x: -x[1])
+
+    # Take the candidate pool (mirrors fusion.ts behaviour).
+    pool: list[tuple[int, float]] = fused[:RERANK_POOL]
+
+    # Cross-encoder reranking: re-score each (query, chunk_text) pair jointly.
+    if reranker is not None and pool:
+        chunk_ids = [cid for cid, _ in pool]
+        placeholders = ",".join("?" * len(chunk_ids))
+        text_rows = con.execute(
+            f"SELECT chunk_id, text FROM chunks WHERE chunk_id IN ({placeholders})",
+            chunk_ids,
+        ).fetchall()
+        id_to_text = {r[0]: r[1] for r in text_rows}
+        passages = [id_to_text.get(cid, "") for cid, _ in pool]
+        scores = call_reranker(reranker, query, passages)
+        if scores is not None and len(scores) == len(pool):
+            pool = sorted(
+                [(cid, score) for (cid, _), score in zip(pool, scores)],
+                key=lambda x: -x[1],
+            )
+
+    # Deduplicate by doc_id, keeping the best-scoring chunk per document.
     seen: list[str] = []
-    for cid, _ in fused[: top_n * 3]:
+    for cid, _ in pool:
         d = c2d.get(cid)
         if d and d not in seen:
             seen.append(d)
@@ -139,6 +194,11 @@ def main() -> int:
     ap.add_argument("--questions", required=True)
     ap.add_argument("--top-k", type=int, default=10)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument(
+        "--rerank",
+        action="store_true",
+        help="Enable cross-encoder reranking (requires reranker service on RERANKER_URL).",
+    )
     args = ap.parse_args()
 
     con = sqlite3.connect(args.db)
@@ -156,13 +216,27 @@ def main() -> int:
     mrr_at = {k: 0.0 for k in ks}
     ndcg_at = {k: 0.0 for k in ks}
 
+    reranker_client: httpx.Client | None = None
+    if args.rerank:
+        reranker_client = httpx.Client(timeout=10)
+        try:
+            reranker_client.get(f"{RERANKER_URL}/health", timeout=3).raise_for_status()
+            print(f"[rerank] connected to {RERANKER_URL}")
+        except Exception as e:
+            print(f"[rerank] WARNING: reranker not reachable at {RERANKER_URL} ({e})")
+            print("[rerank] continuing without reranking — results will be fusion-only")
+            reranker_client = None
+
     t0 = time.time()
     with httpx.Client(timeout=120) as client:
         for i, row in enumerate(qt.itertuples(index=False)):
             expected = set(parse_expected(row.expected_doc_ids))
             if not expected:
                 continue
-            predicted = search(con, client, matrix, ids, c2d, row.question, top_n=args.top_k)
+            predicted = search(
+                con, client, matrix, ids, c2d, row.question,
+                top_n=args.top_k, reranker=reranker_client,
+            )
             for k in ks:
                 top = predicted[:k]
                 if expected & set(top):
@@ -176,8 +250,13 @@ def main() -> int:
                 dt = time.time() - t0
                 print(f"  {i+1}/{len(qt)}  ({(i+1)/dt:.1f} q/s)")
 
+    if reranker_client is not None:
+        reranker_client.close()
+
+    mode = f"fusion + cross-encoder reranker ({RERANKER_URL})" if args.rerank else "fusion only"
     n = len(qt)
     print()
+    print(f"mode: {mode}")
     print(f"{'k':>4} {'Recall':>8} {'MRR':>8} {'nDCG':>8}")
     for k in ks:
         print(f"{k:>4} {hits_at[k]/n:>8.3f} {mrr_at[k]/n:>8.3f} {ndcg_at[k]/n:>8.3f}")

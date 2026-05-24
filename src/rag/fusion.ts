@@ -1,7 +1,8 @@
 import { fetchChunksByIds, getDb, loadAllEmbeddings, type ChunkRow } from "./db.js";
 import { embedQuery } from "./embed.js";
+import { rerank } from "./rerank.js";
 
-export const TOP_K_PER_BRANCH = 8;
+export const TOP_K_PER_BRANCH = 12;
 export const KW_WEIGHT = 0.3;
 export const VEC_WEIGHT = 0.7;
 export const SCORE_THRESHOLD = 0.35;
@@ -22,6 +23,7 @@ export interface SearchHit {
   score: number;
   vec_score: number;
   kw_score: number;
+  rerank_score?: number;
   preview: string;
   ts_from: string | null;
   ts_to: string | null;
@@ -139,15 +141,40 @@ export async function search(query: string, filters: SearchFilters = {}, topN = 
     if (final >= SCORE_THRESHOLD) fused.push({ chunk_id: id, final, kw, vec });
   }
   fused.sort((a, b) => b.final - a.final);
-  const top = fused.slice(0, topN);
+  // Take the full candidate pool (at most 16: 2 branches × 8 each) for the
+  // cross-encoder, then slice to topN after reranking.
+  const pool = fused.slice(0, Math.min(TOP_K_PER_BRANCH * 2, fused.length));
 
-  if (top.length === 0) return [];
+  if (pool.length === 0) return [];
 
-  const rows = fetchChunksByIds(top.map((t) => t.chunk_id));
+  const rows = fetchChunksByIds(pool.map((t) => t.chunk_id));
+
+  // Cross-encoder reranking: the model scores each (query, passage) pair
+  // jointly, catching relevance signals the bi-encoder dot product misses.
+  // Falls back to fusion order if the reranker service is unavailable.
+  const passages = pool.map((t) => {
+    const r = rows.get(t.chunk_id);
+    return r ? r.text : "";  // r.text already contains the header prepended
+  });
+  const rerankScores = await rerank(query, passages);
+
+  // Sort full pool by reranker score, fall back to fusion order.
+  const sortedPool = rerankScores !== null
+    ? pool.map((c, i) => ({ ...c, rerankScore: rerankScores[i] }))
+          .sort((a, b) => b.rerankScore - a.rerankScore)
+    : pool;
+
+  // Deduplicate by doc_id: keep the best-scoring chunk per document.
+  // Multiple chunks from the same document waste result slots and can cause
+  // the agent to open the same document twice. Mirrors the eval script logic.
+  const seenDocIds = new Set<string>();
   const hits: SearchHit[] = [];
-  for (const t of top) {
+  for (const t of sortedPool) {
+    if (hits.length >= topN) break;
     const r = rows.get(t.chunk_id);
     if (!r) continue;
+    if (seenDocIds.has(r.doc_id)) continue;
+    seenDocIds.add(r.doc_id);
     hits.push({
       chunk_id: r.chunk_id,
       doc_id: r.doc_id,
@@ -156,6 +183,7 @@ export async function search(query: string, filters: SearchFilters = {}, topN = 
       score: Number(t.final.toFixed(3)),
       vec_score: Number(t.vec.toFixed(3)),
       kw_score: Number(t.kw.toFixed(3)),
+      rerank_score: "rerankScore" in t ? Number((t.rerankScore as number).toFixed(3)) : undefined,
       preview: preview(r.text),
       ts_from: r.ts_from,
       ts_to: r.ts_to,
