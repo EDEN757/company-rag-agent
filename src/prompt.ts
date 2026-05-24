@@ -12,8 +12,8 @@ Primary workflow:
    source_type, a preview, and a fused score. Use optional filters (source_types,
    date_from, date_to, participant) only when the user is explicit about who, when,
    or where.
-2. Look at the top results. If the highest-scoring hit's preview clearly addresses
-   the question, call \`open_document\` on its doc_id and answer from the full text.
+2. Always call \`open_document\` on the top result's doc_id before answering.
+   Never answer from the search preview alone — the preview is too short.
    Score ≥ 2.0 is almost always a strong match — do not keep re-searching.
 3. Only call \`search\` a SECOND time if (a) the opened document is clearly off-topic,
    or (b) you need a different piece of information from a different source.

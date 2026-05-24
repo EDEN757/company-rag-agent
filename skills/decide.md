@@ -9,7 +9,8 @@ suggested_question: What did we decide about the gocritic paramTypeCombine linte
 Workflow for the user's question:
 
 1. Call `search` for the topic.
-2. Open the top 2 or 3 hits with `open_document`. Read them in full.
+2. You MUST call `open_document` on the top 2 or 3 results. Do not skip this step.
+   Do not answer from the search preview alone — always read the full document first.
 3. Identify the most recent statement that uses decision language. Examples to look for:
    - "we'll go with"
    - "agreed"
