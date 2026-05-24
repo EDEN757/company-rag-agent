@@ -107,8 +107,14 @@ function newAssistantTurn() {
   const sourcesBar = el("div", { class: "sources hidden" }, [
     el("span", { class: "sources-label" }, "Sources"),
   ]);
-  const turn = el("div", { class: "turn" }, []);
+  const timerEl = el("div", { class: "turn-timer" }, "⏱ 0s");
+  const turn = el("div", { class: "turn" }, [timerEl]);
   t.appendChild(turn);
+
+  const startedAt = Date.now();
+  const timerInterval = setInterval(() => {
+    timerEl.textContent = `⏱ ${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+  }, 100);
 
   return {
     turn,
@@ -119,6 +125,9 @@ function newAssistantTurn() {
     bubbleAttached: false,
     indicator: null,
     toolCards: new Map(),
+    timerEl,
+    timerInterval,
+    startedAt,
   };
 }
 
@@ -206,6 +215,11 @@ function collectDocIdsFromToolDetails(ts, ev) {
 }
 
 function finalizeTurn(ts) {
+  clearInterval(ts.timerInterval);
+  const elapsed = ((Date.now() - ts.startedAt) / 1000).toFixed(1);
+  ts.timerEl.textContent = `⏱ ${elapsed}s`;
+  ts.timerEl.classList.add("done");
+
   if (ts.indicator) ts.indicator.remove();
   if (ts.text) {
     for (const m of ts.text.matchAll(DOC_ID_REGEX)) ts.docIds.add(m[1]);
