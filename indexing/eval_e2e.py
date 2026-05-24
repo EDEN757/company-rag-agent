@@ -47,11 +47,11 @@ sys.path.insert(0, str(HERE))
 from embed import DIM, embed_one  # noqa: E402
 
 # ── retrieval constants (keep in sync with fusion.ts / eval_retrieval.py) ────
-TOP_K_PER_BRANCH = 12
+TOP_K_PER_BRANCH = 16
 KW_W = 0.3
 VEC_W = 0.7
 SCALE = 4
-THRESHOLD = 0.35
+THRESHOLD = 0.30
 RERANK_POOL = TOP_K_PER_BRANCH * 2
 
 # ── service URLs ──────────────────────────────────────────────────────────────
@@ -172,9 +172,11 @@ def ask_llm(client: httpx.Client, question: str, doc_text: str) -> str:
         "You are a company knowledge assistant. "
         "Answer the question using only the provided document. "
         "Be concise and specific."
-        + ("\n\n/no_think" if disable_think else "")
     )
-    prompt = f"Document:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+    # /no_think must go in the user message for qwen3-family models — appending
+    # it to the system prompt has no effect on the /api/chat endpoint.
+    suffix = " /no_think" if disable_think else ""
+    prompt = f"Document:\n{context}\n\nQuestion: {question}\n\nAnswer:{suffix}"
 
     r = client.post(
         f"{OLLAMA_HOST}/api/chat",
@@ -185,7 +187,7 @@ def ask_llm(client: httpx.Client, question: str, doc_text: str) -> str:
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
-            "options": {"num_predict": 300},
+            "options": {"num_predict": 500},
         },
         timeout=180,
     )
@@ -301,14 +303,15 @@ def main() -> int:
             hit_at_6 = bool(expected & set(retrieved))
             hit_at_1 = bool(retrieved) and retrieved[0] in expected
 
-            # Fetch top document as LLM context
-            doc_text = ""
-            if retrieved:
+            # Fetch top-3 documents as LLM context (mirrors live agent behaviour)
+            doc_parts = []
+            for doc_id in retrieved[:3]:
                 row_db = con.execute(
-                    "SELECT content FROM documents WHERE doc_id = ?", (retrieved[0],)
+                    "SELECT content FROM documents WHERE doc_id = ?", (doc_id,)
                 ).fetchone()
-                if row_db:
-                    doc_text = row_db[0] or ""
+                if row_db and row_db[0]:
+                    doc_parts.append(f"[{doc_id}]\n{row_db[0]}")
+            doc_text = "\n\n---\n\n".join(doc_parts)
 
             # Generate answer
             try:

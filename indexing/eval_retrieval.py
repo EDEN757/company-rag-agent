@@ -40,11 +40,11 @@ sys.path.insert(0, str(HERE))
 from embed import DIM, embed_one  # noqa: E402
 import httpx  # noqa: E402
 
-TOP_K_PER_BRANCH = 12
+TOP_K_PER_BRANCH = 16
 KW_W = 0.3
 VEC_W = 0.7
 SCALE = 4
-THRESHOLD = 0.35
+THRESHOLD = 0.30
 RERANK_POOL = TOP_K_PER_BRANCH * 2  # mirrors fusion.ts: TOP_K_PER_BRANCH * 2
 
 RERANKER_URL = os.environ.get("RERANKER_URL", "http://127.0.0.1:8001")
