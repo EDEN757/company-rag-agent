@@ -239,7 +239,14 @@ def main() -> int:
     c2d = chunk_to_doc(con)
     print(f"[load] {len(ids)} chunks, dim={DIM}")
 
+    indexed = {r[0] for r in con.execute("SELECT doc_id FROM documents").fetchall()}
+
     qt = pq.read_table(args.questions).to_pandas()
+    before = len(qt)
+    qt = qt[
+        qt.apply(lambda r: any(d in indexed for d in parse_expected(r.expected_doc_ids)), axis=1)
+    ].reset_index(drop=True)
+    print(f"[filter] {len(qt)} / {before} questions have answer docs in the index")
     if args.limit:
         qt = qt.head(args.limit)
 
