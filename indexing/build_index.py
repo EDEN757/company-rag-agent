@@ -134,6 +134,7 @@ def main() -> int:
         out_path.unlink()
 
     con = _open_db(out_path)
+
     existing_docs = _has_documents(con)
     existing_chunks = _has_chunks(con)
     print(f"[init ] existing: {existing_docs} docs, {existing_chunks} chunks, "

@@ -50,6 +50,28 @@ RERANK_POOL = TOP_K_PER_BRANCH * 2  # mirrors fusion.ts: TOP_K_PER_BRANCH * 2
 RERANKER_URL = os.environ.get("RERANKER_URL", "http://127.0.0.1:8001")
 
 
+_STRIP_WORDS = {
+    "what", "who", "when", "where", "how", "which", "why",
+    "is", "are", "was", "were", "do", "does", "did",
+    "can", "could", "should", "would", "will", "have", "has", "had",
+    "the", "a", "an", "of", "to", "in", "for", "on", "at", "by",
+    "from", "with", "and", "or", "but", "not", "that", "this", "these",
+    "be", "been", "being", "get", "got", "make", "made", "used", "use",
+    "also", "any", "some", "into", "than", "then", "its", "their",
+}
+
+
+def strip_to_key_terms(query: str) -> str | None:
+    words = [w for w in re.sub(r"[^\w\s]", " ", query.lower()).split()
+             if len(w) > 2 and w not in _STRIP_WORDS]
+    if len(words) < 3:
+        return None
+    stripped = " ".join(words)
+    if stripped == query.lower().strip():
+        return None
+    return stripped
+
+
 def fts_query(q: str) -> str:
     # Replace punctuation with spaces first, then split — mirrors fusion.ts ftsQuery
     # so hyphenated terms like "INV-2026-11-331" expand to separate tokens rather
@@ -104,13 +126,23 @@ def search(
     top_n: int = 10,
     reranker: httpx.Client | None = None,
 ):
+    def top_k_vec(qv: np.ndarray) -> dict[int, float]:
+        sims = matrix @ qv
+        order = np.argsort(-sims)[:TOP_K_PER_BRANCH]
+        return {int(ids[i]): float(sims[i]) * SCALE for i in order}
+
     qvec = embed_one(client, query)
-    sims = matrix @ qvec
-    order = np.argsort(-sims)[:TOP_K_PER_BRANCH]
-    vec_scores: dict[int, float] = {}
-    for idx in order:
-        # sims is cosine similarity in [-1, 1]; scale to match the kw branch.
-        vec_scores[int(ids[idx])] = float(sims[idx]) * SCALE
+    vec_scores = top_k_vec(qvec)
+
+    # Multi-query: also embed stripped key terms for long queries and merge
+    # candidates, keeping the best score per chunk across both passes.
+    if len(query.split()) > 6:
+        stripped = strip_to_key_terms(query)
+        if stripped:
+            qvec2 = embed_one(client, stripped)
+            for cid, score in top_k_vec(qvec2).items():
+                if score > vec_scores.get(cid, -float("inf")):
+                    vec_scores[cid] = score
 
     rows = con.execute(
         "SELECT c.chunk_id FROM chunks_fts f JOIN chunks c ON c.chunk_id = f.rowid "

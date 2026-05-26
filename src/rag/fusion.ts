@@ -68,6 +68,33 @@ function preview(text: string, maxChars = 320): string {
   return clean.length <= maxChars ? clean : `${clean.slice(0, maxChars).trim()}…`;
 }
 
+/**
+ * Strip a long query down to its key domain terms by removing question words,
+ * auxiliary verbs, and common function words. Returns null if the result is
+ * identical to the input (query was already short/clean) or too short to be useful.
+ * Used to generate a second, more focused vector embedding for multi-query retrieval.
+ */
+function stripToKeyTerms(query: string): string | null {
+  const REMOVE = new Set([
+    "what", "who", "when", "where", "how", "which", "why",
+    "is", "are", "was", "were", "do", "does", "did",
+    "can", "could", "should", "would", "will", "have", "has", "had",
+    "the", "a", "an", "of", "to", "in", "for", "on", "at", "by",
+    "from", "with", "and", "or", "but", "not", "that", "this", "these",
+    "be", "been", "being", "get", "got", "make", "made", "used", "use",
+    "also", "any", "some", "into", "than", "then", "its", "their",
+  ]);
+  const words = query
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !REMOVE.has(w));
+  if (words.length < 3) return null;
+  const stripped = words.join(" ");
+  if (stripped === query.toLowerCase().trim()) return null;
+  return stripped;
+}
+
 export async function search(query: string, filters: SearchFilters = {}, topN = 6): Promise<SearchHit[]> {
   const db = getDb();
   const { sql: whereSql, params } = buildFilterClause(filters);
@@ -94,8 +121,16 @@ export async function search(query: string, filters: SearchFilters = {}, topN = 
     kwScores.set(r.chunk_id, (1 / (1 + rank)) * SCORE_SCALE);
   });
 
-  // --- Vector branch ---
-  const qvec = await embedQuery(query);
+  // --- Vector branch (multi-query) ---
+  // For long queries, also embed a stripped key-term version. The full-query
+  // embedding captures intent/context; the stripped version focuses on domain
+  // terms and recovers docs the full embedding misses due to question-phrasing
+  // dilution. Both run in parallel; candidates are merged before fusion.
+  const stripped = query.split(/\s+/).length > 6 ? stripToKeyTerms(query) : null;
+  const [qvec, qvec2] = await Promise.all([
+    embedQuery(query),
+    stripped ? embedQuery(stripped) : Promise.resolve(null),
+  ]);
   const { matrix, chunkIds, dim } = loadAllEmbeddings();
 
   // Build allowed-id set for filtering, if any filter applies.
@@ -108,27 +143,35 @@ export async function search(query: string, filters: SearchFilters = {}, topN = 
   }
 
   // Cosine similarity = dot product (vectors are L2-normalized).
-  const sims = new Float32Array(chunkIds.length);
-  for (let i = 0; i < chunkIds.length; i++) {
-    if (allowed && !allowed.has(chunkIds[i])) {
-      sims[i] = -Infinity;
-      continue;
+  // Helper: score one query vector against all chunks, return top-K as Map.
+  function topKVec(qv: Float32Array): Map<number, number> {
+    const sims = new Float32Array(chunkIds.length);
+    for (let i = 0; i < chunkIds.length; i++) {
+      if (allowed && !allowed.has(chunkIds[i])) { sims[i] = -Infinity; continue; }
+      let s = 0;
+      const off = i * dim;
+      for (let d = 0; d < dim; d++) s += matrix[off + d] * qv[d];
+      sims[i] = s;
     }
-    let s = 0;
-    const off = i * dim;
-    for (let d = 0; d < dim; d++) s += matrix[off + d] * qvec[d];
-    sims[i] = s;
+    const order = Array.from({ length: chunkIds.length }, (_, i) => i);
+    order.sort((a, b) => sims[b] - sims[a]);
+    const scores = new Map<number, number>();
+    for (let i = 0; i < Math.min(TOP_K_PER_BRANCH, order.length); i++) {
+      const idx = order[i];
+      if (!isFinite(sims[idx])) break;
+      scores.set(chunkIds[idx], sims[idx] * SCORE_SCALE);
+    }
+    return scores;
   }
-  // Top-K from sims.
-  const order: number[] = Array.from({ length: chunkIds.length }, (_, i) => i);
-  order.sort((a, b) => sims[b] - sims[a]);
-  const vecScores = new Map<number, number>();
-  for (let i = 0; i < Math.min(TOP_K_PER_BRANCH, order.length); i++) {
-    const idx = order[i];
-    if (!isFinite(sims[idx])) break;
-    // sims is cosine similarity in [-1, 1] (L2-normalized vectors → dot product).
-    // Scale to put it on the same magnitude as the kw branch ((1/(1+rank))*SCALE).
-    vecScores.set(chunkIds[idx], sims[idx] * SCORE_SCALE);
+
+  // Run vector search for the full query; merge with stripped-query results
+  // by keeping the best score per chunk across both passes.
+  const vecScores = topKVec(qvec);
+  if (qvec2) {
+    for (const [id, score] of topKVec(qvec2)) {
+      const existing = vecScores.get(id) ?? -Infinity;
+      if (score > existing) vecScores.set(id, score);
+    }
   }
 
   // --- Fusion ---
@@ -141,8 +184,6 @@ export async function search(query: string, filters: SearchFilters = {}, topN = 
     if (final >= SCORE_THRESHOLD) fused.push({ chunk_id: id, final, kw, vec });
   }
   fused.sort((a, b) => b.final - a.final);
-  // Take the full candidate pool (at most 16: 2 branches × 8 each) for the
-  // cross-encoder, then slice to topN after reranking.
   const pool = fused.slice(0, Math.min(TOP_K_PER_BRANCH * 2, fused.length));
 
   if (pool.length === 0) return [];
