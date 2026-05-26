@@ -28,12 +28,15 @@ when the user is clearly asking about local files, not company data.
 Keep responses concise. Quote relevant excerpts from documents rather than paraphrasing
 when accuracy matters.`;
 
-// Qwen3-family models emit a <think> block before the answer by default, which
-// breaks tool-call parsing and triples latency on small models. Append the
-// documented `/no_think` directive when LLM_DISABLE_THINKING=1 (set this on
-// Nuvolos where LLM_MODEL=qwen3:8b; leave unset locally for qwen3.5:9b).
+// On Nuvolos (qwen3:8b) set LLM_DISABLE_THINKING=1. The agent uses pi-agent-core
+// with thinkingLevel:"off" (framework layer) plus two text-level guards below:
+// a plain-language instruction (works even if the token directive is ignored)
+// and the qwen3 /no_think soft switch (must be in the system prompt since
+// pi-agent-core owns the user message — it cannot be injected per-turn).
 export const basePrompt =
-  process.env.LLM_DISABLE_THINKING === "1" ? `${_body}\n\n/no_think` : _body;
+  process.env.LLM_DISABLE_THINKING === "1"
+    ? `${_body}\n\nDo not output <think> blocks or internal reasoning. Respond directly.\n\n/no_think`
+    : _body;
 
 // Back-compat alias for src/main.ts and src/smoke.ts which still import `systemPrompt`.
 export const systemPrompt = basePrompt;

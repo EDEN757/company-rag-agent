@@ -206,26 +206,24 @@ def ask_llm(client: httpx.Client, question: str, doc_text: str) -> str:
         "Answer the question using only the provided document. "
         "Be concise and specific."
     )
-    # /no_think must go in the user message for qwen3-family models — appending
-    # it to the system prompt has no effect on the /api/chat endpoint.
-    suffix = " /no_think" if disable_think else ""
-    prompt = f"Document:\n{context}\n\nQuestion: {question}\n\nAnswer:{suffix}"
+    prompt = f"Document:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+    body: dict = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+        "options": {"num_predict": 500},
+    }
+    if disable_think:
+        body["think"] = False
 
-    r = client.post(
-        f"{OLLAMA_HOST}/api/chat",
-        json={
-            "model": LLM_MODEL,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
-            "stream": False,
-            "options": {"num_predict": 500},
-        },
-        timeout=180,
-    )
+    r = client.post(f"{OLLAMA_HOST}/api/chat", json=body, timeout=180)
     r.raise_for_status()
-    return r.json()["message"]["content"].strip()
+    content = r.json()["message"]["content"]
+    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+    return content
 
 
 # ── fact scoring ──────────────────────────────────────────────────────────────
@@ -397,7 +395,7 @@ def main() -> int:
     low = [r for r in results if r["fact_recall"] < 0.5]
     if low:
         print(f"\n  Low-scoring answers ({len(low)}) — check retrieval or LLM quality:")
-        for r in low[:5]:
+        for r in low:
             tag = "retrieval miss" if not r["hit_at_6"] else "LLM miss"
             print(f"    Q{r['q']:02d} [{tag}] {r['question'][:70]}")
             print(f"         facts={r['facts_found']}/{r['total_facts']}  "
