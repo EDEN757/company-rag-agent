@@ -157,9 +157,10 @@ which npm && npm --version
 echo "DB: $RAG_DB_PATH"
 ls -la "$RAG_DB_PATH" | head -1   # should show ~344 MB
 
-# 5. Start the reranker (separate terminal or background)
+# 5. Start the reranker in the background (nohup required on Nuvolos)
 source data/.venv/bin/activate
-python -m uvicorn indexing.reranker:app --port 8001 &
+nohup python -m uvicorn indexing.reranker:app --port 8001 > /tmp/reranker.log 2>&1 &
+sleep 30 && curl http://127.0.0.1:8001/health   # wait for model to load, then verify
 
 # 6. Start the agent
 npm run server
