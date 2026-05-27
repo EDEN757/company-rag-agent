@@ -162,7 +162,9 @@ source data/.venv/bin/activate
 nohup python -m uvicorn indexing.reranker:app --port 8001 > /tmp/reranker.log 2>&1 &
 sleep 30 && curl http://127.0.0.1:8001/health   # wait for model to load, then verify
 
-# 6. Start the agent
+# 6. Start the frontend (new terminal or same — PATH must include /files/bin)
+export PATH="/files/bin:$PATH"
+cd /files/company-rag-agent
 npm run server
 ```
 
