@@ -3,8 +3,8 @@ import { embedQuery } from "./embed.js";
 import { rerank } from "./rerank.js";
 
 export const TOP_K_PER_BRANCH = 16;
-export const KW_WEIGHT = 0.3;
-export const VEC_WEIGHT = 0.7;
+export const KW_WEIGHT = 0.7;
+export const VEC_WEIGHT = 0.3;
 export const SCORE_THRESHOLD = 0.30;
 export const SCORE_SCALE = 4;
 
